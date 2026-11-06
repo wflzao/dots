@@ -1,0 +1,15 @@
+# Installer output
+*.log
+*.bak
+*.bak.*
+*.pre-ricelin
+
+# Generated state
+colors.json
+__pycache__/
+*.pyc
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/

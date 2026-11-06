@@ -1,0 +1,33 @@
+name: Arch dry run
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Preflight on Arch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Run --dry-run in archlinux
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            archlinux:latest \
+            bash -c '
+              set -euo pipefail
+              pacman -Syu --noconfirm --needed bash git curl python jq sudo systemd >/dev/null
+              useradd -m tester
+              echo "tester ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/tester
+              chown -R tester /src
+              su - tester -c "cd /src && ./install.sh --dry-run --yes"
+            '

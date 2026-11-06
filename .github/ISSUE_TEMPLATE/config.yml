@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Upstream Ricelin
+    url: https://github.com/Gakuseei/Ricelin
+    about: Base rice, themes and upstream configuration

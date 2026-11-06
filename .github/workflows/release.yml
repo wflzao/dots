@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tagged release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Verify
+        run: bash -n install.sh
+
+      - name: Checksums
+        run: sha256sum install.sh > SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            install.sh SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

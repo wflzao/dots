@@ -1,0 +1,76 @@
+name: Bug report
+description: Report an installer or desktop regression
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include the last 40 lines of the installer log. Remove tokens, private
+        paths and personal data before posting.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what was expected?
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: EndeavourOS / Arch / CachyOS, version
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: NVIDIA RTX ..., driver ..., or "no NVIDIA"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Installer mode
+      options:
+        - ./install.sh
+        - ./install.sh --yes
+        - ./install.sh --check
+        - ./install.sh --dry-run
+        - ./install.sh --skip-base
+        - ./install.sh --reinstall-base
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: exit-code
+    attributes:
+      label: Exit code
+      placeholder: "26"
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: Last 40 lines of ~/.local/state/ricelin-installer/install-*.log
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed tokens, private paths and personal data from the log.
+          required: true
+        - label: I ran ./install.sh --check and included the result.
+          required: false

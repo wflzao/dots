@@ -1,0 +1,31 @@
+name: ShellCheck
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Bash syntax and ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Bash syntax
+        run: bash -n install.sh
+
+      - name: ShellCheck (errors only)
+        run: shellcheck --severity=error install.sh
+
+      - name: Help output
+        run: ./install.sh --help

@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose an installer or desktop change
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or inconvenient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change, and where?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Existing workarounds or other approaches.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This belongs in install.sh, not in a separate reference script.
+          required: false
+        - label: This needs a clean-VM test.
+          required: false
