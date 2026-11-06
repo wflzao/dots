@@ -10,27 +10,32 @@
 #      its installer with --quickstart --sddm. Skipped when the managed marker
 #      already exists unless --reinstall-base is given.
 #   3. Extra packages: SDDM, the Thunar stack, the greeter's xrandr/xrdb,
-#      nvidia-settings, Zen and nvibrant-bin. AUR packages go through yay/paru;
-#      yay is bootstrapped if the base installer left no helper behind.
+#      nvidia-settings, Zen, OpenCode and nvibrant-bin. AUR packages go through
+#      yay/paru; yay is bootstrapped if the base installer left no helper
+#      behind. Hermes Agent and its Electron Desktop are installed next, then
+#      configured non-interactively for OpenCode Go, local tools and the
+#      gateway service.
 #   4. The requested SDDM order: install the package, create
 #      /etc/sddm.conf.d, then run the upstream torii theme installer at its
 #      real path, configs/sddm/themes/torii/install.sh. (The old guessed path
 #      config/sddm/theme/tokii/install.sh does not exist.)
 #   5. The tested Ricelin customisation scripts, grouped by dependency:
 #        system handover -> updater guard -> SDDM palette/greeter ->
-#        fans/vibrance -> palette -> Thunar/polkit -> menus/glass/game mode ->
-#        screenshots/UI tweaks -> logout.
+#        fans/vibrance -> wallpaper folder -> personal settings/display ->
+#        palette/terminal -> Thunar/polkit -> lock screen -> wallpaper strip ->
+#        menus/glass/game mode -> screenshots/UI tweaks -> clipboard scrolling
+#        -> logout.
 #   6. Final palette render and a verification pass.
 #
 # Usage:
-#   ./install.sh                  interactive
-#   ./install.sh --yes            non-interactive
-#   ./install.sh --check          report only, change nothing
-#   ./install.sh --dry-run        preflight + print the plan
-#   ./install.sh --skip-base      never touch the Ricelin checkout
+#   ./install.sh                 interactive
+#   ./install.sh --yes           non-interactive
+#   ./install.sh --check         report only, change nothing
+#   ./install.sh --dry-run       preflight + print the plan
+#   ./install.sh --skip-base     never touch the Ricelin checkout
 #   ./install.sh --reinstall-base
-#   ./install.sh --no-nvidia      skip fan/vibrance steps
-#   ./install.sh --verbose        stream every step to the terminal
+#   ./install.sh --no-nvidia     skip fan/vibrance steps
+#   ./install.sh --verbose       stream every step to the terminal
 #
 # Run as your desktop user, never as root; sudo/doas/pkexec is used only for
 # the privileged phases. The running graphical session is never stopped.
@@ -59,7 +64,7 @@ NO_NVIDIA=0
 VERBOSE=0
 
 STEP=0
-TOTAL=27
+TOTAL=36
 PF_FAIL=0
 PF_WARN=0
 PF_CODE=10
@@ -198,6 +203,33 @@ run_step() {
         local rc=$?
         fail_step "$label" "$rc"
     fi
+}
+
+# Like run_step, but keeps long-running output visible. Used by Hermes: the
+# desktop build takes minutes and the API-key prompt needs the terminal.
+run_step_stream() {
+    local label=$1; shift
+    STEP=$((STEP + 1))
+    ui_step "$label"
+    if [ "$DRY_RUN" = 1 ]; then
+        ui_plan "$label"
+        return 0
+    fi
+
+    {
+        printf '\n===== %s =====\n' "$label"
+        printf '$ %s\n' "$*"
+    } >>"$LOG" 2>&1
+
+    set +e
+    "$@" 2>&1 | tee -a "$LOG"
+    local rc=${PIPESTATUS[0]}
+    set -e
+
+    if [ "$rc" -ne 0 ]; then
+        fail_step "$label" "$rc"
+    fi
+    ui_ok "$label"
 }
 
 skip_step() {
@@ -458,7 +490,7 @@ aur_install() {
 install_packages() {
     local missing=()
     local p
-    for p in thunar thunar-volman gvfs tumbler xorg-xrandr xorg-xrdb; do
+    for p in thunar thunar-volman gvfs tumbler xorg-xrandr xorg-xrdb opencode; do
         pkg_installed "$p" || missing+=("$p")
     done
     if [ "$NVIDIA_OK" = 1 ] && ! pkg_installed nvidia-settings; then
@@ -489,6 +521,109 @@ install_packages() {
         fi
     fi
 }
+
+install_hermes() (
+# Install Hermes Agent and build its Electron desktop app.
+#
+# The official bootstrap is used with --include-desktop so the CLI, the native
+# desktop app and its launcher are all produced. --skip-setup keeps Hermes's
+# own interactive wizard out of the way: configure_hermes applies the same
+# choices non-interactively immediately afterwards.
+set -eu
+export PATH="$HOME/.local/bin:$PATH"
+
+local hh="${HERMES_HOME:-$HOME/.hermes}"
+local desktop="$hh/hermes-agent/apps/desktop/release/linux-unpacked/Hermes"
+local launcher="$HOME/.local/share/applications/com.nousresearch.hermes.desktop"
+
+if [ -x "$HOME/.local/bin/hermes" ] && { [ -x "$desktop" ] || [ -f "$launcher" ]; }; then
+    printf 'Hermes Agent and Hermes Desktop are already installed.\n'
+    exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || {
+    printf 'curl is required to install Hermes.\n' >&2
+    exit 1
+}
+command -v git >/dev/null 2>&1 || {
+    printf 'git is required to install Hermes.\n' >&2
+    exit 1
+}
+
+local tmp
+tmp=$(mktemp "${TMPDIR:-/tmp}/hermes-install.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$tmp" || {
+    printf 'Could not download the Hermes installer.\n' >&2
+    exit 1
+}
+bash "$tmp" --include-desktop --skip-setup
+)
+
+configure_hermes() (
+# Apply the setup choices that the Hermes wizard would otherwise ask for.
+#
+# Model: OpenCode Go, deepseek-v4.1-flash, high reasoning.
+# Runtime: local terminal, local Chromium, Exa free web search.
+# Tools: everything useful except image/video generation, X search, TTS,
+#        Kanban, A2A, Yuanbao, cron jobs and video analysis.
+# Gateway: install and start the user service, with no messaging platforms.
+# Telemetry: "No thanks" (collection and upload both off).
+set -eu
+export PATH="$HOME/.local/bin:$PATH"
+
+local hb="$HOME/.local/bin/hermes"
+local hh="${HERMES_HOME:-$HOME/.hermes}"
+local envfile="$hh/.env"
+local key=""
+
+[ -x "$hb" ] || {
+    printf 'Hermes is not installed at %s.\n' "$hb" >&2
+    exit 1
+}
+mkdir -p "$hh"
+
+# The provider key is a secret, so it is never stored in this repository.
+# Reuse OPENCODE_GO_API_KEY, an existing ~/.hermes/.env entry, or ask once.
+if ! grep -Eq '^[[:space:]]*OPENCODE_GO_API_KEY=' "$envfile" 2>/dev/null; then
+    if [ -n "${OPENCODE_GO_API_KEY:-}" ]; then
+        "$hb" config set OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY" >/dev/null 2>&1
+    elif ( : </dev/tty ) 2>/dev/null; then
+        printf '\nOpenCode Go API key (input hidden): ' >/dev/tty
+        IFS= read -rs key </dev/tty || key=""
+        printf '\n' >/dev/tty
+        if [ -n "$key" ]; then
+            "$hb" config set OPENCODE_GO_API_KEY "$key" >/dev/null 2>&1
+            unset key
+        else
+            printf 'No key entered; run the installer again or add OPENCODE_GO_API_KEY to %s.\n' "$envfile" >&2
+        fi
+    else
+        printf 'No terminal for the OpenCode Go key; add OPENCODE_GO_API_KEY to %s.\n' "$envfile" >&2
+    fi
+fi
+
+"$hb" config set model.provider opencode-go >/dev/null
+"$hb" config set model.default deepseek-v4.1-flash >/dev/null
+"$hb" config set model.base_url https://opencode.ai/zen/go/v1 >/dev/null
+"$hb" config set model.api_mode chat_completions >/dev/null
+"$hb" config set --force agent.reasoning_effort high >/dev/null
+"$hb" config set terminal.backend local >/dev/null
+"$hb" config set browser.cloud_provider local >/dev/null
+"$hb" config set web.backend exa >/dev/null
+"$hb" config set web.provider_tier.exa free >/dev/null
+"$hb" config set platform_toolsets.cli \
+    '["browser","clarify","code_execution","computer_use","connections","context_engine","delegation","file","memory","session_search","skills","terminal","todo","vision","web"]' >/dev/null
+"$hb" config set gateway.service_install_choice install >/dev/null
+"$hb" config set telemetry.shared_metrics.enabled false >/dev/null
+"$hb" config set telemetry.shared_metrics.send false >/dev/null
+"$hb" config set --force telemetry.shared_metrics.offer_version 2 >/dev/null
+
+"$hb" gateway install --start-now --start-on-login >/dev/null
+"$hb" gateway restart >/dev/null 2>&1 || true
+
+printf 'Hermes: OpenCode Go / deepseek-v4.1-flash, high reasoning, local tools, gateway service.\n'
+)
 
 install_sddm() {
     if ! pkg_installed sddm; then
@@ -550,7 +685,7 @@ final_render() {
 # ---------------------------------------------------------------- verification
 verify_report() {
     local soft=${1:-0}
-    local fatal=0 current theme
+    local fatal=0 current theme htools hmodel hreason hprovider selection_fg selection_bg
     printf '\n%sVerification%s\n' "$B" "$RESET"
 
     if [ -f "$HOME/.config/hypr/.ricelin-managed" ]; then
@@ -696,6 +831,164 @@ verify_report() {
     else
         ui_warn "Settings zoom: not 1.0"
     fi
+    if grep -q 'ricelin-wallpaper-center' "$HOME/.config/quickshell/pill/Wallpaper.qml" 2>/dev/null; then
+        ui_ok "Wallpaper strip: centres on the active wallpaper"
+    else
+        ui_warn "Wallpaper strip: cold-start centring patch missing"
+    fi
+    if grep -q 'Theme.scrim' "$HOME/.config/quickshell/lock/LockSurface.qml" 2>/dev/null \
+        && grep -q 'backdropDarken' "$HOME/.config/quickshell/lock/Singletons/Theme.qml" 2>/dev/null; then
+        ui_ok "Lock screen: palette scrim follows light/dark tone"
+    else
+        ui_warn "Lock screen: palette scrim missing"
+    fi
+    if jq -e '.paletteMode == "dynamic"
+              and .weekStart == "sun"
+              and .nightLightMode == "scheduled"
+              and .nightLightTemp == 3500
+              and .nightLightOnMin == 1140
+              and .nightLightOffMin == 360' \
+        "$HOME/.local/state/ricelin/flags.json" >/dev/null 2>&1; then
+        ui_ok "SUPER+I: dynamic palette, Sunday week, scheduled night light"
+    else
+        ui_warn "SUPER+I: personal settings are not all applied"
+    fi
+    if grep -q 'time = 19:00' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null \
+        && grep -q 'temperature = 3500' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null \
+        && grep -q 'time = 6:00' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null; then
+        ui_ok "Night light: 19:00-06:00 at 3500 K"
+    else
+        ui_warn "Night light: scheduled profile not found"
+    fi
+
+    current=$(hyprctl monitors -j 2>/dev/null | jq -r '[.[] | select(.disabled == false)][0].name // empty' 2>/dev/null || true)
+    if [ -n "$current" ] \
+        && grep -Eq "output[[:space:]]*=[[:space:]]*\"$current\"" "$HOME/.config/hypr/modules/monitors.lua" 2>/dev/null \
+        && grep -q '@' "$HOME/.config/hypr/modules/monitors.lua" 2>/dev/null; then
+        ui_ok "Display: $current at native resolution + highest refresh"
+    else
+        ui_warn "Display: explicit native-mode block not found"
+    fi
+    if [ -f "$HOME/.config/quickshell/pill/Clipboard.qml" ] \
+        && ! grep -q 'snapMode: ListView.SnapToItem' "$HOME/.config/quickshell/pill/Clipboard.qml" \
+        && grep -q 'ricelin-smooth-wheel' "$HOME/.config/quickshell/pill/Clipboard.qml"; then
+        ui_ok "Clipboard: continuous wheel scrolling"
+    else
+        ui_warn "Clipboard: row snapping still present"
+    fi
+    local wallpapers_ok=1
+    for name in 1.png 2.jpg 3.png 4.jpg; do
+        [ -s "$HOME/.config/ricelin/wallpapers/$name" ] || wallpapers_ok=0
+    done
+    if [ -x "$HOME/.config/hypr/scripts/wallpaper.sh" ] \
+        && [ -d "$HOME/.config/ricelin/wallpapers" ] \
+        && [ ! -e "$HOME/Ricelin" ] \
+        && [ "$wallpapers_ok" = 1 ] \
+        && [ "$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)" = "$HOME/.config/ricelin/wallpapers/4.jpg" ] \
+        && jq -e --arg dir "$HOME/.config/ricelin/wallpapers" '.wallpaperDir == $dir and .paletteTone == "dark"' \
+            "$HOME/.local/state/ricelin/flags.json" >/dev/null 2>&1; then
+        ui_ok "Wallpapers: bundled set; 4.jpg default; matugen dark"
+    else
+        ui_warn "Wallpapers: set, 4.jpg default or dark tone incomplete"
+    fi
+    if python3 - "$HOME/.cache/ricelin/ghostty-colors" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+try:
+    text = Path(sys.argv[1]).read_text()
+except OSError:
+    raise SystemExit(1)
+
+values = {}
+palette = {}
+for line in text.splitlines():
+    match = re.match(r"palette\s*=\s*(\d+)\s*=\s*(#[0-9a-fA-F]{6})\s*$", line)
+    if match:
+        palette[int(match.group(1))] = match.group(2).lower()
+        continue
+    if "=" in line:
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+
+if len(palette) != 16 or not values.get("background") or not values.get("selection-background"):
+    raise SystemExit(1)
+if values["background"] == values["selection-background"]:
+    raise SystemExit(1)
+
+def rgb(color):
+    color = color.lstrip("#")
+    return tuple(int(color[index:index + 2], 16) / 255 for index in (0, 2, 4))
+
+def luminance(color):
+    def channel(value):
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+    red, green, blue = rgb(color)
+    return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+def contrast(first, second):
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+background = values["background"]
+if contrast(values["selection-foreground"], values["selection-background"]) < 4.0:
+    raise SystemExit(1)
+for slot in range(1, 16):
+    if contrast(palette[slot], background) < 4.0:
+        raise SystemExit(1)
+PY
+    then
+        ui_ok "Terminal: readable ANSI colours with a distinct selection"
+    else
+        ui_warn "Terminal: palette contrast or selection is incomplete"
+    fi
+    selection_fg=$(sed -n '/^\[Colors:Selection\]/,/^\[/p' "$HOME/.local/share/color-schemes/Ricelin.colors" 2>/dev/null | awk -F= '/^ForegroundActive=/{print $2; exit}')
+    selection_bg=$(sed -n '/^\[Colors:Selection\]/,/^\[/p' "$HOME/.local/share/color-schemes/Ricelin.colors" 2>/dev/null | awk -F= '/^BackgroundNormal=/{print $2; exit}')
+    if [ -n "$selection_fg" ] && [ -n "$selection_bg" ] && [ "$selection_fg" != "$selection_bg" ]; then
+        ui_ok "KDE selection: active text contrasts with its background"
+    else
+        ui_warn "KDE selection: active text equals its background"
+    fi
+
+    if pkg_installed opencode || command -v opencode >/dev/null 2>&1; then
+        ui_ok "OpenCode: installed"
+    else
+        ui_warn "OpenCode: missing"
+    fi
+
+    if [ -x "$HOME/.local/bin/hermes" ]; then
+        hprovider=$("$HOME/.local/bin/hermes" config get model.provider --raw 2>/dev/null | head -n1 || true)
+        hmodel=$("$HOME/.local/bin/hermes" config get model.default --raw 2>/dev/null | head -n1 || true)
+        hreason=$("$HOME/.local/bin/hermes" config get agent.reasoning_effort --raw 2>/dev/null | head -n1 || true)
+        htools=$("$HOME/.local/bin/hermes" config get platform_toolsets.cli --json 2>/dev/null || true)
+        if [ "$hprovider" = "opencode-go" ] && [ "$hmodel" = "deepseek-v4.1-flash" ] \
+            && [ "$hreason" = "high" ] \
+            && printf '%s' "$htools" | grep -q '"browser"' \
+            && ! printf '%s' "$htools" | grep -Eq '"(image_gen|video_gen|x_search|tts|kanban|cronjob|video|yuanbao)"'; then
+            ui_ok "Hermes: OpenCode Go / deepseek-v4.1-flash / high reasoning"
+        else
+            ui_warn "Hermes: model or toolset choices differ"
+        fi
+        if [ -x "$HOME/.hermes/hermes-agent/apps/desktop/release/linux-unpacked/Hermes" ] \
+            || [ -f "$HOME/.local/share/applications/com.nousresearch.hermes.desktop" ]; then
+            ui_ok "Hermes Desktop: installed"
+        else
+            ui_warn "Hermes Desktop: app not built"
+        fi
+        if systemctl --user is-enabled --quiet hermes-gateway.service 2>/dev/null; then
+            ui_ok "Hermes gateway: user service enabled"
+        else
+            ui_warn "Hermes gateway: user service not enabled"
+        fi
+        if grep -Eq '^[[:space:]]*OPENCODE_GO_API_KEY=' "$HOME/.hermes/.env" 2>/dev/null; then
+            ui_ok "Hermes: OpenCode Go key present"
+        else
+            ui_warn "Hermes: OpenCode Go key missing"
+        fi
+    else
+        ui_warn "Hermes: not installed"
+    fi
 
     if [ "$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d \"\')" = "Ricelin" ]; then
         ui_ok "Thunar icons: Ricelin matugen theme"
@@ -818,8 +1111,9 @@ confirm() {
     if [ ! -t 0 ]; then
         fail_with 10 "No controlling terminal for confirmation." "Re-run with --yes for a non-interactive install."
     fi
-    printf '\nThis will install packages, run the Ricelin base installer if needed,\n'
-    printf 'apply the rice customisations, and remove LightDM, Firefox and Dolphin.\n'
+    printf '\nThis will install packages (including OpenCode), run the\n'
+    printf 'Ricelin base installer if needed, apply the rice customisations, and\n'
+    printf 'remove LightDM, Firefox and Dolphin.\n'
     printf 'Dolphin demo files, if present, are removed by the system-integration step.\n\n'
     local answer
     read -r -p "Continue? [y/N] " answer
@@ -864,7 +1158,9 @@ main() {
     else
         run_step "Ricelin base (clone/update + install.sh --quickstart --sddm)" bootstrap_ricelin
     fi
-    run_step "Packages (Thunar stack, greeter tools, Zen, nvibrant)" install_packages
+    run_step "Packages (Thunar stack, greeter tools, Zen, OpenCode, nvibrant)" install_packages
+    run_step_stream "Hermes Agent + Desktop" install_hermes
+    run_step_stream "Hermes setup (model, tools, gateway)" configure_hermes
     run_step "SDDM package + $SDDM_CONF_DIR" install_sddm
     run_step "torii SDDM theme (configs/sddm/themes/torii)" install_torii_theme
 
@@ -888,7 +1184,11 @@ main() {
         skip_step "Digital vibrance 75%" "no working NVIDIA driver (or --no-nvidia)"
     fi
 
-    # 4. Palette and desktop appearance.
+    # 4. Personal choices, then palette and desktop appearance.
+    run_step "Wallpaper folder in .config" stage_wallpaper_dir
+    run_step "Wallpaper set + 4.jpg default" stage_wallpapers
+    run_step "SUPER+I personal settings" stage_personal_settings
+    run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
     run_step "Portal colour-scheme sync" stage_portal_scheme
     run_step "Zen wallpaper colours" stage_zen_colors
@@ -897,6 +1197,8 @@ main() {
     run_step "Hyprtoolkit / polkit palette" stage_hyprtoolkit_palette
     run_step "Night-light cursor" stage_nightlight_cursor
     run_step "Wallpaper tone control" stage_wallpaper_tone
+    run_step "Wallpaper strip centering" stage_wallpaper_center
+    run_step "Lock screen palette" stage_lock_theme
     run_step "Settings zoom" stage_settings_zoom
     run_step "Atomic theme writes" stage_atomic_theme_write
     run_step "Pretty menus" stage_pretty_menus
@@ -906,6 +1208,7 @@ main() {
     # 5. Desktop behaviour.
     run_step "Screenshot binds + hyprshot" apply_screenshots
     run_step "UI tweaks (cursor 12, Q binds, Thunar double-click)" stage_ui_tweaks
+    run_step "Smooth clipboard scrolling" stage_clipboard_scroll
     run_step "Logout to SDDM" apply_logout
 
     # 6. Finalize.
@@ -1360,9 +1663,10 @@ stage_one_tone_palette() (
 # same light or dark mode, as the GTK apps and Zen.
 #
 # Two things make that true:
-#   wallcolors.py    terminal() builds ghostty's base16 from the pill palette and
-#                    the HLS lightness of its surface, instead of matugen's
-#                    separate always-dark scheme
+#   wallcolors.py    terminal() builds ghostty's base16 from the pill palette
+#                    and the HLS lightness of its surface, with a conventional
+#                    contrast-checked ANSI wheel instead of matugen's separate
+#                    always-dark scheme
 #   decoration.lua   blur vibrancy 0.15 (was 0.25) and vibrancy_darkness 0.10
 #                    (was 0.15), so translucent windows tint the backdrop less
 #
@@ -1409,15 +1713,13 @@ trap 'rm -f "$engine"' EXIT HUP INT TERM
 cat > "$engine" <<'ENGINE'
 def terminal(pill, source_hex):
     """
-    Ghostty's base16. By default it follows the same palette and the same light or
-    dark mode as the app theme, so the terminal stops living in a tone of its own:
-    the surface ramp and the text come from the pill palette, the eight accents
-    from matugen in that mode. GTK, Zen and the terminal all take their mode
-    from one test, the HLS lightness of the palette's surface.
+    Ghostty's base16. It follows the same palette and the same light or dark
+    mode as the app theme, so the terminal stops living in a tone of its own:
+    the background and text come from the pill palette, while the ANSI colours
+    are a conventional, contrast-checked hue wheel.
 
     A file at STATE/terminal-dark pins the older always-dark matugen scheme
-    instead, which is what the Ricelin installer
-    --revert toggles.
+    instead, which is what the Ricelin installer --revert toggles.
     """
     if (STATE / "terminal-dark").is_file():
         b = {k: v["dark"]["color"] for k, v in matugen(source_hex)["base16"].items()}
@@ -1434,19 +1736,78 @@ def terminal(pill, source_hex):
     r, g, b = (int(pill["surface"][i:i + 2], 16) / 255 for i in (1, 3, 5))
     mode = "light" if colorsys.rgb_to_hls(r, g, b)[1] > 0.5 else "dark"
     accents = {k: v[mode]["color"] for k, v in matugen(source_hex, mode)["base16"].items()}
-    ramp = [pill["surface"], pill["surface_container_low"], pill["surface_container"],
-            pill["surface_container_high"], pill["surface_container_highest"],
-            pill["outline_variant"], pill["dim"], pill["cream"]]
-    lines = [
-        f'background = {pill["surface"]}',
-        f'foreground = {pill["cream"]}',
-        f'cursor-color = {pill["primary"]}',
-        f'selection-background = {pill["surface_container_high"]}',
-        f'selection-foreground = {pill["cream"]}',
+    bg = pill["surface"]
+
+    def hls(color):
+        return colorsys.rgb_to_hls(*rgb(color))
+
+    def from_hls(h, l, s):
+        return "#%02x%02x%02x" % tuple(round(value * 255) for value in colorsys.hls_to_rgb(h, l, s))
+
+    def fit(color, ratio=4.5):
+        """Move a colour away from the terminal background until it is readable."""
+        if contrast(color, bg) >= ratio:
+            return color
+        h, l, s = hls(color)
+        direction = -1 if mode == "light" else 1
+        for step in range(1, 51):
+            new_l = clamp(l + direction * step * 0.02)
+            candidate = from_hls(h, new_l, s)
+            if contrast(candidate, bg) >= ratio:
+                return candidate
+            if new_l <= 0.0 or new_l >= 1.0:
+                break
+        return from_hls(h, 0.0 if mode == "light" else 1.0, s)
+
+    def brighter(color, amount=0.08):
+        h, l, s = hls(color)
+        return from_hls(h, clamp(l + (-amount if mode == "light" else amount)), s)
+
+    # Matugen's base16 is not a full hue wheel (its base0A can be blue), so
+    # yellow and cyan are synthesised; the rest keep the wallpaper's own tint.
+    sat = clamp(hls(pill["primary"])[2] * 1.1, 0.35, 0.65)
+    base_l = 0.45 if mode == "light" else 0.62
+
+    red = fit(accents["base08"])
+    green = fit(accents["base0b"])
+    yellow = fit(from_hls(50 / 360, base_l, sat))
+    blue = fit(accents["base0d"])
+    magenta = fit(accents["base0e"])
+    cyan = fit(from_hls(185 / 360, base_l, sat))
+
+    # ANSI 0 and 8 are neutrals, not text; they intentionally sit near the
+    # background. Every other slot is contrast-checked.
+    black = pill["surface_container_highest"] if mode == "dark" else pill["icon_dim"]
+    bright_black = fit(pill["outline"])
+    white = fit(pill["cream"])
+    bright_white = fit(pill["bright"])
+
+    palette = [
+        black, red, green, yellow, blue, magenta, cyan, white,
+        bright_black,
+        fit(brighter(red)), fit(brighter(green)), fit(brighter(yellow)),
+        fit(brighter(blue)), fit(brighter(magenta)), fit(brighter(cyan)),
+        bright_white,
     ]
-    lines += [f'palette = {i}={color}' for i, color in enumerate(ramp)]
-    lines += [f'palette = {i}={accents["base%02x" % i]}' for i in range(8, 16)]
+
+    selection = mix(pill["primary"], pill["surface"])
+    selection_text = next(
+        (color for color in (pill["cream"], pill["bright"], pill["surface"], "#ffffff", "#000000")
+         if contrast(color, selection) >= 4.5),
+        max((pill["cream"], pill["bright"], "#ffffff", "#000000"),
+            key=lambda color: contrast(color, selection)),
+    )
+
+    lines = [
+        f'background = {bg}',
+        f'foreground = {white}',
+        f'cursor-color = {selection}',
+        f'selection-background = {selection}',
+        f'selection-foreground = {selection_text}',
+    ]
+    lines += [f'palette = {i}={color}' for i, color in enumerate(palette)]
     return "\n".join(lines) + "\n"
+
 
 
 ENGINE
@@ -1460,6 +1821,7 @@ import sys
 
 path, engine = sys.argv[1], sys.argv[2]
 text = open(path, encoding="utf-8").read()
+original = text
 block = open(engine, encoding="utf-8").read()
 
 MATUGEN_OLD = '''def matugen(source_hex):
@@ -1495,22 +1857,36 @@ PUBLISH_NEW = r'''    try:
 
 ANCHOR = "def render_fastfetch(pill):"
 
-if "def terminal(pill, source_hex):" in text:
-    print("wallcolors.py: terminal engine already installed")
-else:
-    for probe, label in ((MATUGEN_OLD, "matugen()"),
-                         (PUBLISH_OLD, "the ghostty block in publish()"),
-                         (ANCHOR, "render_fastfetch()")):
-        if probe not in text:
-            sys.exit(f"wallcolors.py: {label} does not match the expected shape")
+if ANCHOR not in text:
+    sys.exit("wallcolors.py: render_fastfetch() anchor is missing")
+
+if MATUGEN_OLD in text:
     text = text.replace(MATUGEN_OLD, MATUGEN_NEW, 1)
+elif MATUGEN_NEW not in text:
+    sys.exit("wallcolors.py: matugen() anchor does not match the expected shape")
+
+if PUBLISH_OLD in text:
     text = text.replace(PUBLISH_OLD, PUBLISH_NEW, 1)
+elif "ghostty = terminal(pill, source_hex)" not in text:
+    sys.exit("wallcolors.py: the ghostty block in publish() does not match the expected shape")
+
+if "def terminal(pill, source_hex):" in text:
+    start = text.index("def terminal(pill, source_hex):")
+    end = text.index("\ndef render_fastfetch(pill):", start)
+    text = text[:start] + block + text[end + 1:]
+    verb = "refreshed"
+else:
     text = text.replace(ANCHOR, block + ANCHOR, 1)
+    verb = "installed"
+
+if text != original:
     tmp = path + ".05.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.replace(tmp, path)
-    print("wallcolors.py: terminal engine installed")
+    print(f"wallcolors.py: terminal engine {verb}")
+else:
+    print("wallcolors.py: terminal engine already current")
 PY
 
 python3 -m py_compile "$wc"
@@ -1608,7 +1984,7 @@ def render_kde(pill):
         "Colors:Window": (bg, bg_alt, fg, dim, accent, accent_alt, accent, accent_alt),
         "Colors:View": (view, bg_alt, fg, dim, accent, accent_alt, accent, accent_alt),
         "Colors:Button": (high, bg, fg, dim, accent, accent_alt, accent, accent_alt),
-        "Colors:Selection": (accent, accent_alt, on_accent, on_accent, accent, accent_alt,
+        "Colors:Selection": (accent, accent_alt, on_accent, on_accent, on_accent, on_accent,
                              on_accent, on_accent),
         "Colors:Tooltip": (highest, high, fg, dim, accent, accent_alt, accent, accent_alt),
         "Colors:Complementary": (bg_alt, view, fg, dim, accent, accent_alt, accent, accent_alt),
@@ -1631,6 +2007,7 @@ def render_kde(pill):
                focus, hover, link, visited) in sections.items():
         if not parser.has_section(name):
             parser.add_section(name)
+        selection = name == "Colors:Selection"
         values = {
             "BackgroundNormal": background,
             "BackgroundAlternate": alternate,
@@ -1639,9 +2016,9 @@ def render_kde(pill):
             "ForegroundActive": focus,
             "ForegroundLink": link,
             "ForegroundVisited": visited,
-            "ForegroundNegative": negative,
-            "ForegroundNeutral": neutral,
-            "ForegroundPositive": positive,
+            "ForegroundNegative": on_accent if selection else negative,
+            "ForegroundNeutral": on_accent if selection else neutral,
+            "ForegroundPositive": on_accent if selection else positive,
             "DecorationFocus": focus,
             "DecorationHover": hover,
         }
@@ -1673,6 +2050,7 @@ def render_kde(pill):
     scheme_out = ["[General]", "ColorScheme=Ricelin", "Name=Ricelin", ""]
     for name, (background, alternate, foreground, inactive,
                focus, hover, link, visited) in sections.items():
+        selection = name == "Colors:Selection"
         scheme_out.append("[" + name + "]")
         scheme_out.append("BackgroundNormal=" + _kde_rgb(background))
         scheme_out.append("BackgroundAlternate=" + _kde_rgb(alternate))
@@ -1681,9 +2059,9 @@ def render_kde(pill):
         scheme_out.append("ForegroundActive=" + _kde_rgb(focus))
         scheme_out.append("ForegroundLink=" + _kde_rgb(link))
         scheme_out.append("ForegroundVisited=" + _kde_rgb(visited))
-        scheme_out.append("ForegroundNegative=" + _kde_rgb(negative))
-        scheme_out.append("ForegroundNeutral=" + _kde_rgb(neutral))
-        scheme_out.append("ForegroundPositive=" + _kde_rgb(positive))
+        scheme_out.append("ForegroundNegative=" + _kde_rgb(on_accent if selection else negative))
+        scheme_out.append("ForegroundNeutral=" + _kde_rgb(on_accent if selection else neutral))
+        scheme_out.append("ForegroundPositive=" + _kde_rgb(on_accent if selection else positive))
         scheme_out.append("DecorationFocus=" + _kde_rgb(focus))
         scheme_out.append("DecorationHover=" + _kde_rgb(hover))
         scheme_out.append("")
@@ -1695,6 +2073,7 @@ def render_kde(pill):
 '''
 
 text = open(wc, encoding="utf-8").read()
+original = text
 if apply:
     start = text.find("# ricelin-kde-palette\n")
     if start != -1:
@@ -1748,10 +2127,11 @@ else:
         'if sys.argv[1] == "--apps":', 1)
     if "def render_kde(pill):" in text or "--kde" in text:
         sys.exit("could not fully remove the KDE renderer from wallcolors.py")
-tmp = wc + ".tmp"
-with open(tmp, "w", encoding="utf-8") as fh:
-    fh.write(text)
-os.replace(tmp, wc)
+if text != original:
+    tmp = wc + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, wc)
 
 # ---------------------------------------------------------------- fish greeting
 FISH_BLOCK_OLD = '''R=$'\\e[38;2;224;86;59m'
@@ -1789,6 +2169,7 @@ X=$'\\e[0m'
 '''
 
 text = open(fish, encoding="utf-8").read()
+original = text
 if apply:
     if "# ricelin-fish-palette" not in text:
         if FISH_BLOCK_OLD not in text:
@@ -1799,10 +2180,11 @@ else:
     end = text.find("X=$'\\e[0m'\n", start)
     if start != -1 and end != -1:
         text = text[:start] + FISH_BLOCK_OLD + text[end + len("X=$'\\e[0m'\n"):]
-tmp = fish + ".tmp"
-with open(tmp, "w", encoding="utf-8") as fh:
-    fh.write(text)
-os.replace(tmp, fish)
+if text != original:
+    tmp = fish + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, fish)
 
 print(("Applied" if apply else "Reverted") + ": KDE/Qt and fish follow the palette.")
 PY
@@ -2834,7 +3216,7 @@ stage_wallpaper_tone() (
 # The choice is remembered for each wallpaper in
 # ~/.local/state/ricelin/wallpaper-tone.json (path -> light|dark; Auto is the
 # absence of an entry). Switching back to a wallpaper restores its pick; a
-# wallpaper never seen before is Auto.
+# wallpaper never seen before is Dark.
 #
 # How it hangs together: wallcolors.py records the live flag into the store every
 # time it renders a wallpaper, and wallpaper.sh loads the store for the new
@@ -2879,6 +3261,7 @@ esac
 
 result=$(python3 - "$MODE" "$WC" "$WP" "$FLAGS" "$DEFAULTS" "$PAGE" "$PALETTE" <<'PY'
 import os
+import stat
 import sys
 
 mode, wc, wp, flags, defaults, page, palette = sys.argv[1:8]
@@ -2914,8 +3297,10 @@ def commit():
         if text == original.get(path):
             continue
         tmp = path + ".09.tmp"
+        mode = stat.S_IMODE(os.stat(path).st_mode)
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(text)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
 
 
@@ -2926,7 +3311,7 @@ TONE_STORE = STATE / "wallpaper-tone.json"
 
 
 def palette_tone():
-    return flags().get("paletteTone", "auto")
+    return flags().get("paletteTone", "dark")
 
 
 def palette_light():
@@ -2987,6 +3372,9 @@ if mode == "apply":
     edit(wc, WC_ANCHOR, WC_ANCHOR + "\n" + WC_HELPER, "wallcolors.py helper", "def remember_tone")
     edit(wc, WC_MAIN_OLD, WC_MAIN_NEW, "wallcolors.py call", "remember_tone(key, palette_tone())")
     edit(wc, WC_CACHE_OLD, WC_CACHE_NEW, "wallcolors.py cache prune", "seen.items() if os.path.isfile(k)")
+    edit(wc, '    return flags().get("paletteTone", "auto")',
+         '    return flags().get("paletteTone", "dark")',
+         "wallcolors.py default dark", 'flags().get("paletteTone", "dark")')
 else:
     edit(wc, "\n" + WC_HELPER, "", "wallcolors.py helper", "@@never@@")
     edit(wc, WC_MAIN_NEW, WC_MAIN_OLD, "wallcolors.py call", "@@never@@")
@@ -3008,8 +3396,8 @@ WP_BLOCK_NEW = """    mkdir -p "$(dirname "$STATE")"
     # ricelin-wallpaper-tone: each wallpaper remembers its own Auto/Light/Dark
     # pick, so load it before rendering. wallcolors writes the store from the live
     # flag, so reading the store first keeps this picture's value.
-    tone=$(jq -r --arg p "$pic" '.[$p] // "auto"' "$TONE_STORE" 2>/dev/null || echo auto)
-    [ -n "$tone" ] || tone=auto
+    tone=$(jq -r --arg p "$pic" '.[$p] // "dark"' "$TONE_STORE" 2>/dev/null || echo dark)
+    [ -n "$tone" ] || tone=dark
     if jq --indent 4 --arg t "$tone" '.paletteTone = $t' "$flags_file" > "$flags_file.tmp" 2>/dev/null; then
         mv "$flags_file.tmp" "$flags_file"
     else
@@ -3026,6 +3414,11 @@ WP_CMD_NEW = '''        python3 "$(dirname "$0")/wallcolors.py" "$show" "$pic" >
 if mode == "apply":
     edit(wp, WP_VAR_OLD, WP_VAR_NEW, "wallpaper.sh store var", "TONE_STORE=")
     edit(wp, WP_BLOCK_OLD, WP_BLOCK_NEW, "wallpaper.sh load store", "ricelin-wallpaper-tone")
+    edit(wp, '    tone=$(jq -r --arg p "$pic" \'.[$p] // "auto"\' "$TONE_STORE" 2>/dev/null || echo auto)\n'
+            '    [ -n "$tone" ] || tone=auto\n',
+         '    tone=$(jq -r --arg p "$pic" \'.[$p] // "dark"\' "$TONE_STORE" 2>/dev/null || echo dark)\n'
+         '    [ -n "$tone" ] || tone=dark\n',
+         "wallpaper.sh default dark", '.[$p] // "dark"')
     edit(wp, WP_CMD_OLD, WP_CMD_NEW, "wallpaper.sh tone key", '"$show" "$pic"')
 else:
     edit(wp, WP_VAR_NEW, WP_VAR_OLD, "wallpaper.sh store var", "@@never@@")
@@ -3040,13 +3433,16 @@ FL_ALIAS_NEW = FL_ALIAS_OLD + '''    property alias paletteTone: adapter.palette
 
 FL_PROP_OLD = '''            property string paletteMode: "static"
 '''
-FL_PROP_NEW = FL_PROP_OLD + '''            /** Auto follows the wallpaper; each wallpaper remembers its own Light or Dark pick. */
-            property string paletteTone: "auto"
+FL_PROP_NEW = FL_PROP_OLD + '''            /** Dark by default; each wallpaper can still remember its own Light or Dark pick. */
+            property string paletteTone: "dark"
 '''
 
 if mode == "apply":
     edit(flags, FL_ALIAS_OLD, FL_ALIAS_NEW, "Flags.qml alias", "alias paletteTone")
     edit(flags, FL_PROP_OLD, FL_PROP_NEW, "Flags.qml property", 'property string paletteTone')
+    edit(flags, '            property string paletteTone: "auto"\n',
+         '            property string paletteTone: "dark"\n',
+         "Flags.qml default dark", 'property string paletteTone: "dark"')
 else:
     edit(flags, FL_ALIAS_NEW, FL_ALIAS_OLD, "Flags.qml alias", "@@never@@")
     edit(flags, FL_PROP_NEW, FL_PROP_OLD, "Flags.qml property", "@@never@@")
@@ -3054,7 +3450,7 @@ else:
 # --- PillDefaults.js ---------------------------------------------------------
 DF_DEFAULT_OLD = '''    paletteMode: "static",
 '''
-DF_DEFAULT_NEW = DF_DEFAULT_OLD + '''    paletteTone: "auto",
+DF_DEFAULT_NEW = DF_DEFAULT_OLD + '''    paletteTone: "dark",
 '''
 
 DF_APPEAR_OLD = '''var appearanceKeys = ["paletteMode", '''
@@ -3064,7 +3460,9 @@ DF_PRESET_OLD = '''var presetKeys = pillKeys.concat(["paletteMode", '''
 DF_PRESET_NEW = '''var presetKeys = pillKeys.concat(["paletteMode", "paletteTone", '''
 
 if mode == "apply":
-    edit(defaults, DF_DEFAULT_OLD, DF_DEFAULT_NEW, "PillDefaults.js default", 'paletteTone: "auto"')
+    edit(defaults, DF_DEFAULT_OLD, DF_DEFAULT_NEW, "PillDefaults.js default", 'paletteTone:')
+    edit(defaults, '    paletteTone: "auto",\n', '    paletteTone: "dark",\n',
+         "PillDefaults.js default dark", 'paletteTone: "dark"')
     edit(defaults, DF_APPEAR_OLD, DF_APPEAR_NEW, "PillDefaults.js appearanceKeys", 'var appearanceKeys = ["paletteMode", "paletteTone"')
     edit(defaults, DF_PRESET_OLD, DF_PRESET_NEW, "PillDefaults.js presetKeys", 'var presetKeys = pillKeys.concat(["paletteMode", "paletteTone"')
 else:
@@ -3144,9 +3542,9 @@ printf '%s\n' "$result" | grep -v '^__CHANGED__' || true
 flag_changed=0
 if [ -f "$FLAGSJSON" ]; then
     if [ "$MODE" = apply ] && ! jq -e 'has("paletteTone")' "$FLAGSJSON" >/dev/null 2>&1; then
-        if jq --indent 4 '.paletteTone = "auto"' "$FLAGSJSON" > "$FLAGSJSON.tmp" 2>/dev/null; then
+        if jq --indent 4 '.paletteTone = "dark"' "$FLAGSJSON" > "$FLAGSJSON.tmp" 2>/dev/null; then
             mv "$FLAGSJSON.tmp" "$FLAGSJSON"; flag_changed=1
-            echo "apply: flags.json paletteTone=auto"
+            echo "apply: flags.json paletteTone=dark"
         else
             rm -f "$FLAGSJSON.tmp"
         fi
@@ -5621,6 +6019,627 @@ if systemctl --user is-active --quiet hyprpolkitagent.service 2>/dev/null; then
 fi
 
 echo "Polkit prompt: follows the wallpaper palette."
+)
+
+stage_wallpaper_dir() (
+# Keep the wallpaper collection under ~/.config/ricelin, not ~/Ricelin.
+#
+# The upstream base still seeds ~/Ricelin/wallpapers. This stage moves that
+# collection once, points Flags.wallpaperDir at the new folder, migrates every
+# state/cache file that stores an old path, and patches the fallback strings in
+# the wallpaper helpers so a later update cannot quietly recreate the home
+# folder. It also restores the executable bit on the helper scripts; the
+# upstream copy ships wallpaper.sh non-executable, which breaks Super+B.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATEBASE="${XDG_STATE_HOME:-$HOME/.local/state}"
+CACHEBASE="${XDG_CACHE_HOME:-$HOME/.cache}"
+OLD="$HOME/Ricelin/wallpapers"
+NEW="$CONFIG/ricelin/wallpapers"
+FLAGS="$STATEBASE/ricelin/flags.json"
+DIRSTATE="$STATEBASE/ricelin-wallpaper-dir"
+
+[ -d "$CONFIG/hypr/scripts" ] || {
+    echo "Hyprland scripts are not installed at $CONFIG/hypr/scripts" >&2
+    exit 1
+}
+mkdir -p "$NEW"
+if [ -d "$OLD" ]; then
+    find "$OLD" -mindepth 1 -maxdepth 1 -exec mv -n -t "$NEW" -- {} +
+    rmdir "$OLD" 2>/dev/null || true
+    rmdir "$HOME/Ricelin" 2>/dev/null || true
+fi
+
+[ -s "$FLAGS" ] || printf '{}\n' > "$FLAGS"
+tmp=$(mktemp "$FLAGS.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+jq --arg dir "$NEW" '.wallpaperDir = $dir' "$FLAGS" > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$FLAGS"
+printf '%s\n' "$NEW" > "$DIRSTATE"
+
+python3 - "$OLD" "$NEW" "$STATEBASE" "$CACHEBASE" <<'PY'
+import sys
+from pathlib import Path
+
+old, new, statebase, cachebase = sys.argv[1:5]
+state = Path(statebase)
+cache = Path(cachebase)
+
+# Plain text state files.
+for path in (
+    state / "ricelin-wallpaper",
+    state / "ricelin-wallpaper-dir",
+    state / "ricelin-wallpaper-map",
+    state / "ricelin-wallpaper-bag",
+    state / "ricelin" / "wallpaper-tone.json",
+    cache / "ricelin" / "analyze-v2.json",
+):
+    try:
+        text = path.read_text()
+    except OSError:
+        continue
+    if old in text:
+        updated = text.replace(old, new)
+        if updated != text:
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(updated)
+            tmp.replace(path)
+PY
+
+python3 - "$CONFIG" <<'PY'
+import sys
+from pathlib import Path
+
+config = Path(sys.argv[1])
+shell_old = '"$HOME/Ricelin/wallpapers"'
+shell_new = '"${XDG_CONFIG_HOME:-$HOME/.config}/ricelin/wallpapers"'
+qml_old = 'Quickshell.env("HOME") + "/Ricelin/wallpapers"'
+qml_new = '(Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/ricelin/wallpapers"'
+comment_old = "~/Ricelin/wallpapers"
+comment_new = "~/.config/ricelin/wallpapers"
+
+targets = [
+    config / "hypr/scripts/wallpaper.sh",
+    config / "hypr/scripts/wallpaper-search.sh",
+    config / "hypr/scripts/wallpaper-thumbs.sh",
+    config / "hypr/scripts/app-install.sh",
+    config / "quickshell/pill/Singletons/Walls.qml",
+    config / "quickshell/pill/Singletons/Flags.qml",
+    config / "quickshell/pill/Wallpaper.qml",
+]
+for path in targets:
+    try:
+        text = path.read_text()
+    except OSError:
+        continue
+    updated = text.replace(shell_old, shell_new)
+    updated = updated.replace(qml_old, qml_new)
+    updated = updated.replace(comment_old, comment_new)
+    if updated != text:
+        path.write_text(updated)
+PY
+
+# The upstream helper is not executable, so the Super+B binding cannot run it.
+find "$CONFIG/hypr/scripts" -maxdepth 1 -type f -name '*.sh' -exec chmod 0755 {} +
+
+# Re-resolve the folder once so the strip and the pager agree immediately.
+if [ -x "$CONFIG/hypr/scripts/wallpaper.sh" ]; then
+    bash "$CONFIG/hypr/scripts/wallpaper.sh" resolve >/dev/null 2>&1 || true
+fi
+if [ -x "$CONFIG/hypr/scripts/ricelin" ] && qs -c pill ipc show >/dev/null 2>&1; then
+    "$CONFIG/hypr/scripts/ricelin" restart pill >/dev/null 2>&1 || true
+fi
+
+echo "Wallpapers: $NEW (helpers executable)."
+)
+
+stage_wallpapers() (
+# Ship the Ricelin wallpaper set and make 4.jpg the default.
+#
+# The four images live in this repository under wallpapers/. A checkout is
+# copied directly; a standalone installer downloads the same files from the
+# repository's raw URL. The default is written to the live wallpaper state and,
+# when a Hyprland session is up, applied immediately. The palette tone is pinned
+# to dark so a new install starts on the matugen dark scheme instead of deriving
+# Auto from the image.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATEBASE="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE="$STATEBASE/ricelin"
+FLAGS="$STATE/flags.json"
+WALLDIR="$CONFIG/ricelin/wallpapers"
+TONE="$STATE/wallpaper-tone.json"
+MAP="$STATEBASE/ricelin-wallpaper-map"
+DEFAULT="$WALLDIR/4.jpg"
+RAW_URL="https://raw.githubusercontent.com/wflzao/dots/main/wallpapers"
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+
+mkdir -p "$WALLDIR" "$STATE"
+
+for name in 1.png 2.jpg 3.png 4.jpg; do
+    dest="$WALLDIR/$name"
+    if [ -n "$HERE" ] && [ -s "$HERE/wallpapers/$name" ]; then
+        if [ ! -s "$dest" ] || ! cmp -s "$HERE/wallpapers/$name" "$dest"; then
+            tmp="$dest.tmp"
+            cp -f "$HERE/wallpapers/$name" "$tmp"
+            mv -f "$tmp" "$dest"
+        fi
+    elif [ ! -s "$dest" ]; then
+        command -v curl >/dev/null 2>&1 || {
+            echo "curl is required to download the wallpaper set." >&2
+            exit 1
+        }
+        tmp="$dest.tmp"
+        curl -fsSL --retry 3 --connect-timeout 15 "$RAW_URL/$name" -o "$tmp" || {
+            rm -f "$tmp"
+            echo "Could not download wallpaper: $name" >&2
+            exit 1
+        }
+        mv -f "$tmp" "$dest"
+    fi
+    chmod 0644 "$dest"
+done
+
+[ -s "$DEFAULT" ] || {
+    echo "Default wallpaper 4.jpg is missing." >&2
+    exit 1
+}
+
+# Make 4.jpg the live wallpaper and pin the matugen tone to dark.
+[ -s "$FLAGS" ] || printf '{}\n' > "$FLAGS"
+tmp=$(mktemp "$FLAGS.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+jq --arg dir "$WALLDIR" '.wallpaperDir = $dir | .paletteTone = "dark"' "$FLAGS" > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$FLAGS"
+printf '%s\n' "$DEFAULT" > "$STATEBASE/ricelin-wallpaper"
+
+# Remember the dark choice for 4.jpg as well, so wallpaper.sh does not fall
+# back to Auto after a later wallpaper switch.
+if [ -s "$TONE" ] && jq -e 'type == "object"' "$TONE" >/dev/null 2>&1; then
+    tmp=$(mktemp "$TONE.XXXXXX")
+    if jq --arg p "$DEFAULT" '.[$p] = "dark"' "$TONE" > "$tmp" 2>/dev/null; then
+        chmod 0644 "$tmp"
+        mv "$tmp" "$TONE"
+    else
+        rm -f "$tmp"
+    fi
+else
+    printf '{}\n' > "$TONE"
+    tmp=$(mktemp "$TONE.XXXXXX")
+    jq -n --arg p "$DEFAULT" '{($p): "dark"}' > "$tmp"
+    chmod 0644 "$tmp"
+    mv "$tmp" "$TONE"
+fi
+
+# Point every current output at the default. The state file is authoritative
+# when no monitors can be queried, so a stale map must not win on next login.
+if command -v hyprctl >/dev/null 2>&1 && hyprctl monitors -j >/dev/null 2>&1; then
+    tmp=$(mktemp "$MAP.XXXXXX")
+    if hyprctl monitors -j 2>/dev/null | jq -r '.[].name' 2>/dev/null \
+        | while IFS= read -r output; do
+            [ -n "$output" ] && printf '%s\t%s\n' "$output" "$DEFAULT"
+        done > "$tmp" && [ -s "$tmp" ]; then
+        chmod 0644 "$tmp"
+        mv "$tmp" "$MAP"
+    else
+        rm -f "$tmp"
+    fi
+else
+    rm -f "$MAP"
+fi
+
+# Apply now when a session is available. Failure here is harmless: the state
+# above is what the next login reads.
+if [ -x "$CONFIG/hypr/scripts/wallpaper.sh" ] \
+    && command -v hyprctl >/dev/null 2>&1 && hyprctl monitors -j >/dev/null 2>&1; then
+    bash "$CONFIG/hypr/scripts/wallpaper.sh" set "$DEFAULT" all >/dev/null 2>&1 || true
+fi
+
+echo "Wallpapers: 1.png, 2.jpg, 3.png, 4.jpg; default 4.jpg; tone dark."
+)
+
+stage_personal_settings() (
+# Copy the live SUPER+I choices that differ from the shipped defaults.
+#
+# Palette: dynamic (wallpaper colours drive the desktop, not the static washi
+# set). Calendar: Sunday first. Night light: scheduled at 3500 K from 19:00 to
+# 06:00. The app theme and cursor size are already handled by the base/UI
+# stages. These live in flags.json, which is the file the
+# Settings app writes; the matching hyprsunset profile is written too so the
+# night light works before the first Settings visit.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/ricelin"
+FLAGS="$STATE/flags.json"
+SUNSET="$CONFIG/hypr/hyprsunset.conf"
+
+mkdir -p "$STATE" "$CONFIG/hypr"
+[ -s "$FLAGS" ] || printf '{}\n' > "$FLAGS"
+command -v jq >/dev/null 2>&1 || { echo "jq is required." >&2; exit 1; }
+
+tmp=$(mktemp "$FLAGS.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+jq '.paletteMode = "dynamic"
+    | .weekStart = "sun"
+    | .nightLightMode = "scheduled"
+    | .nightLightTemp = 3500
+    | .nightLightOnMin = 1140
+    | .nightLightOffMin = 360' "$FLAGS" > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$FLAGS"
+
+cat > "$SUNSET" <<'EOF'
+max-gamma = 150
+
+profile {
+    time = 19:00
+    temperature = 3500
+}
+
+profile {
+    time = 6:00
+    identity = true
+}
+EOF
+
+if systemctl --user is-active --quiet hyprsunset.service 2>/dev/null; then
+    systemctl --user restart hyprsunset.service >/dev/null 2>&1 || true
+fi
+
+echo "SUPER+I: dynamic palette, Sunday week start, 19:00-06:00 night light at 3500 K."
+)
+
+stage_display_mode() (
+# Pin every active monitor to its native resolution and highest refresh rate.
+#
+# The output name is read from Hyprland, never hard-coded, so this works on a
+# different port or laptop panel. The wildcard block stays first as a fallback
+# for a monitor that appears after install.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+MONITORS="$CONFIG/hypr/modules/monitors.lua"
+
+[ -d "$CONFIG/hypr/modules" ] || { echo "Hyprland modules are not installed." >&2; exit 1; }
+command -v hyprctl >/dev/null 2>&1 || {
+    echo "hyprctl not available; leaving monitor autodetection in place."
+    exit 0
+}
+
+python3 - "$MONITORS" <<'PY'
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    raw = subprocess.check_output(
+        ["hyprctl", "monitors", "-j"],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    )
+    monitors = json.loads(raw)
+except Exception as exc:
+    print(f"Could not read monitors ({exc}); leaving autodetection in place.")
+    sys.exit(0)
+
+active = [m for m in monitors if not m.get("disabled")]
+if not active:
+    print("No active monitor; leaving autodetection in place.")
+    sys.exit(0)
+
+lines = [
+    "-- Written by the Ricelin installer: native resolution at the highest refresh.",
+    "",
+    "hl.monitor({",
+    '    output   = "",',
+    '    mode     = "preferred",',
+    '    position = "auto",',
+    '    scale    = 1,',
+    "})",
+    "",
+]
+written = []
+for monitor in active:
+    if monitor.get("mirrorOf") not in (None, "none"):
+        continue
+    name = str(monitor.get("name") or "")
+    if not name:
+        continue
+
+    pattern = re.compile(r"^(\d+)x(\d+)@([0-9.]+)Hz$")
+    modes = []
+    for mode in monitor.get("availableModes") or []:
+        match = pattern.match(str(mode))
+        if match:
+            modes.append((int(match.group(1)), int(match.group(2)), float(match.group(3))))
+
+    if modes:
+        # Native is the largest resolution the panel advertises; refresh is the
+        # highest rate published for that exact resolution.
+        width, height = max({(w, h) for w, h, _ in modes}, key=lambda size: (size[0] * size[1], size[0], size[1]))
+        rates = [rate for w, h, rate in modes if (w, h) == (width, height)]
+        refresh = max(rates)
+    else:
+        width = int(monitor.get("width") or 0)
+        height = int(monitor.get("height") or 0)
+        refresh = float(monitor.get("refreshRate") or 0)
+    if not width or not height or refresh <= 0:
+        continue
+
+    if abs(refresh - round(refresh)) < 0.05:
+        rate = str(int(round(refresh)))
+    else:
+        rate = f"{refresh:.2f}"
+
+    scale = monitor.get("scale") or 1
+    try:
+        scale_value = float(scale)
+        scale_text = str(int(scale_value)) if scale_value.is_integer() else f"{scale_value:g}"
+    except (TypeError, ValueError):
+        scale_text = "1"
+
+    x = int(monitor.get("x") or 0)
+    y = int(monitor.get("y") or 0)
+    lines.extend([
+        "hl.monitor({",
+        f'    output   = "{name}",',
+        f'    mode     = "{width}x{height}@{rate}",',
+        f'    position = "{x}x{y}",',
+        f'    scale    = {scale_text},',
+        "})",
+        "",
+    ])
+    written.append(f"{name} {width}x{height}@{rate}")
+
+if not written:
+    print("No usable modes; leaving autodetection in place.")
+    sys.exit(0)
+
+path.write_text("\n".join(lines).rstrip() + "\n")
+print("Display: " + ", ".join(written))
+PY
+
+if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl reload >/dev/null 2>&1 || true
+fi
+
+echo "Display: native resolution at the panel's highest refresh."
+)
+
+stage_clipboard_scroll() (
+# Make the clipboard history glide instead of snapping row by row.
+#
+# Clipboard.qml uses ListView.SnapToItem, which fights WheelScroller's
+# continuous goal animation: the wheel moves a little, then the list jumps to
+# the nearest row. Removing the snap mode lets the same wheel bridge scroll
+# smoothly; keyboard selection still uses positionViewAtIndex(Contain).
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+CLIP="$CONFIG/quickshell/pill/Clipboard.qml"
+RESTART="$CONFIG/hypr/scripts/ricelin"
+
+[ -f "$CLIP" ] || { echo "Clipboard.qml not found at $CLIP" >&2; exit 1; }
+
+python3 - "$CLIP" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+changed = False
+
+if "        snapMode: ListView.SnapToItem\n" in text:
+    text = text.replace("        snapMode: ListView.SnapToItem\n", "", 1)
+    changed = True
+
+if "// ricelin-smooth-wheel" not in text:
+    old = "        boundsBehavior: Flickable.StopAtBounds\n"
+    new = ("        boundsBehavior: Flickable.StopAtBounds\n"
+           "        // ricelin-smooth-wheel: continuous wheel scrolling, no row snapping.\n")
+    if old in text:
+        text = text.replace(old, new, 1)
+        changed = True
+
+if changed:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+PY
+
+if [ -x "$RESTART" ] && qs -c pill ipc show >/dev/null 2>&1; then
+    "$RESTART" restart pill >/dev/null 2>&1 || true
+fi
+
+echo "Clipboard: wheel scrolling is continuous."
+)
+
+stage_wallpaper_center() (
+# Keep the SUPER+C wallpaper strip centred on the active wallpaper.
+#
+# The strip opens immediately, but Walls.current is read asynchronously from
+# ~/.local/state/ricelin-wallpaper after the thumbnail/list pass. On a cold
+# Quickshell start the strip can therefore open before the current path is
+# known, centring the first/newest tile instead. Re-centre when either the list
+# or the current path arrives, but only while the surface is open and not in
+# search mode.
+
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+WALLPAPER="$CONFIG/quickshell/pill/Wallpaper.qml"
+RESTART="$CONFIG/hypr/scripts/ricelin"
+
+[ -f "$WALLPAPER" ] || {
+    echo "Wallpaper.qml not found at $WALLPAPER" >&2
+    exit 1
+}
+
+python3 - "$WALLPAPER" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+text = open(path).read()
+
+if "// ricelin-wallpaper-center" not in text:
+    old = '''    Connections {
+        target: Walls
+        function onEntriesChanged() {
+            if (!root.searching && root.focusIndex >= Walls.count)
+                root.focusIndex = Math.max(0, Walls.count - 1);
+        }
+    }'''
+    new = '''    Connections {
+        target: Walls
+
+        // ricelin-wallpaper-center
+        function onEntriesChanged() {
+            if (!root.searching && root.focusIndex >= Walls.count)
+                root.focusIndex = Math.max(0, Walls.count - 1);
+            if (root.active && !root.searching && Walls.current.length > 0)
+                Qt.callLater(root.centerOnCurrent);
+        }
+
+        function onCurrentChanged() {
+            if (root.active && !root.searching)
+                Qt.callLater(root.centerOnCurrent);
+        }
+    }'''
+    if old not in text:
+        sys.exit("Wallpaper.qml Connections block did not match the expected layout")
+    text = text.replace(old, new, 1)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+PY
+
+if [ -x "$RESTART" ] && qs -c pill ipc show >/dev/null 2>&1; then
+    "$RESTART" restart pill >/dev/null 2>&1 || true
+fi
+
+echo "Wallpaper strip: centres on the active wallpaper after a cold start."
+)
+
+stage_lock_theme() (
+# Make the Quickshell lock follow the live palette in both tones.
+#
+# The lock is a blurred grab of the desktop with a fixed 0.62 darken in
+# grade.frag. That was fine while the palette was always the dark washi set,
+# but with a light wallpaper palette the text flips to dark ink while the grab
+# is still darkened, so the date and the password capsule sit on a mid-grey
+# wash and lose contrast. Overlay the palette surface as a scrim (light for a
+# light palette, dark for a dark one), soften the grade darken for light, and
+# use the palette surface behind the surface while it loads.
+
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+LOCK="$CONFIG/quickshell/lock"
+
+[ -f "$LOCK/Singletons/Dyn.qml" ] || {
+    echo "Lock config not found at $LOCK" >&2
+    exit 1
+}
+
+python3 - "$LOCK" <<'PY'
+import sys
+from pathlib import Path
+
+lock = Path(sys.argv[1])
+
+# 1. Dyn: expose the palette surface so the lock can tint its scrim.
+dyn = lock / "Singletons" / "Dyn.qml"
+text = dyn.read_text()
+if "readonly property string surface:" not in text:
+    old = "    readonly property string primary: adapter.primary\n"
+    new = "    readonly property string surface: adapter.surface\n    readonly property string primary: adapter.primary\n"
+    if old not in text:
+        sys.exit("Dyn.qml property block did not match")
+    text = text.replace(old, new, 1)
+    old = '            property string primary: "#f5bd6f"\n'
+    new = '            property string surface: "#211711"\n            property string primary: "#f5bd6f"\n'
+    if old not in text:
+        sys.exit("Dyn.qml JsonAdapter block did not match")
+    text = text.replace(old, new, 1)
+    dyn.write_text(text)
+
+# 2. Theme: tone-aware scrim and backdrop darkening.
+theme = lock / "Singletons" / "Theme.qml"
+text = theme.read_text()
+if "readonly property color surface:" not in text:
+    old = "    readonly property bool dyn: Flags.paletteMode !== \"static\"\n"
+    new = ('    readonly property bool dyn: Flags.paletteMode !== "static"\n'
+           '    readonly property color surface: dyn ? Dyn.surface : "#211711"\n'
+           '    readonly property bool light: Qt.color(surface).hslLightness > 0.5\n'
+           '    /** Palette surface over the blurred grab: frost for light, deepen for dark. */\n'
+           '    readonly property color scrim: Qt.rgba(Qt.color(surface).r, Qt.color(surface).g, Qt.color(surface).b, light ? 0.55 : 0.30)\n'
+           '    readonly property real backdropDarken: light ? 0.88 : 0.62\n')
+    if old not in text:
+        sys.exit("Theme.qml dyn block did not match")
+    text = text.replace(old, new, 1)
+    theme.write_text(text)
+
+# 3. LockSurface: use the tone-aware darken and add the scrim above the blur.
+surface = lock / "LockSurface.qml"
+text = surface.read_text()
+if "color: Theme.scrim" not in text:
+    old = "                property real darken: 0.62\n"
+    new = "                property real darken: Theme.backdropDarken\n"
+    if old not in text:
+        sys.exit("LockSurface.qml darken did not match")
+    text = text.replace(old, new, 1)
+    old = '''    GlowField {
+        anchors.left: parent.left'''
+    new = '''    /** Palette scrim: keeps the blurred grab in the same tone as the desktop. */
+    Rectangle {
+        anchors.fill: parent
+        color: Theme.scrim
+    }
+
+    GlowField {
+        anchors.left: parent.left'''
+    if old not in text:
+        sys.exit("LockSurface.qml GlowField anchor did not match")
+    text = text.replace(old, new, 1)
+    surface.write_text(text)
+
+# 4. shell.qml: no dark-brown flash before the grab is ready.
+shell = lock / "shell.qml"
+text = shell.read_text()
+if 'color: "#160f0a"' in text:
+    text = text.replace('color: "#160f0a"', "color: Theme.surface", 1)
+    shell.write_text(text)
+
+# 5. Content.qml: the cover placeholder follows the palette too.
+content = lock / "Content.qml"
+text = content.read_text()
+if 'color: "#1a100c"' in text:
+    text = text.replace('color: "#1a100c"', "color: Theme.surface", 1)
+    content.write_text(text)
+PY
+
+if [ -x "$CONFIG/hypr/scripts/ricelin" ] && qs -c lock ipc show >/dev/null 2>&1; then
+    "$CONFIG/hypr/scripts/ricelin" restart lock >/dev/null 2>&1 || true
+fi
+
+echo "Lock screen: palette scrim follows the live light/dark tone."
 )
 
 stage_portal_scheme() (

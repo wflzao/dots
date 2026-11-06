@@ -7,6 +7,28 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Installs OpenCode from the Arch `extra` repository.
+- Installs Hermes Agent and builds Hermes Desktop through the official
+  bootstrap, with the setup choices applied non-interactively: OpenCode Go,
+  `deepseek-v4.1-flash`, high reasoning, local terminal and browser, Exa free
+  search, a curated CLI toolset, the gateway user service and telemetry off.
+- Adds the four Ricelin wallpapers (`1.png`, `2.jpg`, `3.png`, `4.jpg`) to the
+  repository and installs them into `~/.config/ricelin/wallpapers`; `4.jpg` is
+  the default wallpaper.
+- Defaults the dynamic matugen palette tone to Dark instead of Auto.
+- Copies the live SUPER+I choices: dynamic palette, Sunday week start, and a
+  scheduled 3500 K night light from 19:00 to 06:00.
+- Moves wallpapers to `~/.config/ricelin/wallpapers`, migrates the saved paths
+  and restores the executable bit on the wallpaper helpers so SUPER+B works.
+- Pins each active monitor to its native resolution and highest refresh rate
+  without hard-coding an output name.
+- Rebuilds the terminal ANSI palette with readable, conventional colours and a
+  clear selection highlight; fixes KDE selection text and active colours.
+- Removes clipboard-history row snapping so wheel scrolling is continuous.
+- Adds wallpaper-strip centring and the palette-aware lock-screen scrim.
+
 ### Planned
 
 - Clean Arch/CachyOS/EndeavourOS VM test before the first tagged release.

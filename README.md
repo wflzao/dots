@@ -10,7 +10,7 @@ external stage files.
 - Non-root desktop user with `sudo`, `doas` or `pkexec`
 - `git`, `curl`, `python3`, `jq`, `systemctl`, `timeout`
 - Network access to `github.com` and the AUR
-- 1 GiB free under `$HOME` (5 GiB recommended)
+- 3 GiB free under `$HOME` (8 GiB recommended with Hermes Desktop)
 - NVIDIA optional; fan and vibrance stages are skipped without a working driver
 
 ## Usage
@@ -51,19 +51,34 @@ The installer runs six phases:
    and run `install.sh --quickstart --sddm`. Skipped when
    `~/.config/hypr/.ricelin-managed` exists, unless `--reinstall-base`.
 3. **Packages** — SDDM, Thunar stack, greeter tools, `nvidia-settings`, Zen,
-   `nvibrant-bin`; bootstraps `yay`/`paru` when needed.
+   OpenCode, `nvibrant-bin`; bootstraps `yay`/`paru` when needed. Hermes Agent
+   and Hermes Desktop are installed from the official bootstrap, and the
+   wizard choices are applied non-interactively: OpenCode Go,
+   `deepseek-v4.1-flash`, high reasoning, local terminal and browser, Exa free
+   search, a curated CLI toolset, the gateway user service and telemetry off.
+   The OpenCode Go API key comes from `OPENCODE_GO_API_KEY` or a hidden prompt.
 4. **SDDM** — installs the package, creates `/etc/sddm.conf.d`, runs the
    upstream theme installer at `configs/sddm/themes/torii/install.sh`.
 5. **Customisation** — system handover, diff-only updater, SDDM palette and
-   greeter, fans/vibrance, KDE/fish and terminal palette, portal colour-scheme
-   sync, Zen colours, Thunar, polkit, night-light cursor, wallpaper tone,
-   settings zoom, atomic theme writes, menus, app glass, game-mode opacity,
-   screenshots, UI tweaks, logout.
+   greeter, fans/vibrance, the live SUPER+I choices (dynamic palette, Sunday
+   week start, scheduled 3500 K night light), the bundled wallpaper set
+   (`1.png`, `2.jpg`, `3.png`, `4.jpg`) in `~/.config/ricelin/wallpapers` with
+   `4.jpg` as the default and the matugen tone pinned to Dark, native
+   resolution at the highest refresh,
+   KDE/fish and terminal palette, portal colour-scheme sync, Zen colours,
+   Thunar, polkit, night-light cursor, wallpaper tone, wallpaper-strip
+   centring, lock-screen palette, settings zoom, atomic theme writes, menus,
+   app glass, game-mode opacity, screenshots, UI tweaks, smooth clipboard
+   scrolling, logout.
 6. **Verification** — final palette render and blocking-item report.
 
 The installer removes **LightDM**, **Firefox** and **Dolphin**, including their
 user configuration, and switches to SDDM, Zen and Thunar. It never stops the
 running graphical session. A reboot is required to land on SDDM.
+
+New installs start on `4.jpg` with the dynamic matugen palette forced to
+**Dark**. Change the wallpaper from the strip or SUPER+B, and the tone from
+SUPER+I > Appearance > Palette; **Auto** remains available per wallpaper.
 
 ## Logs and exit codes
 
