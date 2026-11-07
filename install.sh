@@ -10,26 +10,29 @@
 #      its installer with --quickstart --sddm. Skipped when the managed marker
 #      already exists unless --reinstall-base is given.
 #   3. Extra packages: SDDM, the Thunar stack, the greeter's xrandr/xrdb,
-#      nvidia-settings, Zen, OpenCode and nvibrant-bin. AUR packages go through
-#      yay/paru; yay is bootstrapped if the base installer left no helper
-#      behind. Hermes Agent and its Electron Desktop are installed next with
-#      their own interactive setup wizard; the installer does not preselect
-#      providers, models, keys or tools for Hermes.
+#      nvidia-settings, Zen and OpenCode. nvibrant-bin is installed by the
+#      vibrance stage. AUR packages go through yay/paru; yay is bootstrapped if
+#      the base installer left no helper behind. Hermes Agent and its Electron
+#      Desktop are installed next with their own interactive setup wizard; the
+#      installer does not preselect providers, models, keys or tools during
+#      setup. A later stage routes DeepSeek V4.1 Flash between OpenCode's free
+#      model and OpenCode Go.
 #   4. The requested SDDM order: install the package, create
 #      /etc/sddm.conf.d, then run the upstream torii theme installer at its
 #      real path, configs/sddm/themes/torii/install.sh. (The old guessed path
 #      config/sddm/theme/tokii/install.sh does not exist.)
-#   5. The tested Ricelin customisation scripts, grouped by dependency:
+#   5. The tested Ricelin customisation stages, grouped by dependency:
 #        system handover -> updater guard -> SDDM palette/greeter ->
-#        fans/vibrance -> wallpaper folder -> personal settings/night-light
-#        fade/display -> palette/terminal -> Thunar/polkit -> lock screen ->
-#        wallpaper strip -> menus/glass/game mode -> screenshots/UI tweaks ->
-#        clipboard scrolling -> logout.
+#        fans/vibrance -> wallpaper folder -> personal settings/Hermes/agent
+#        activity/model routing -> night-light fade/display -> palette/terminal
+#        -> fish -> Thunar/polkit -> lock screen -> wallpaper strip ->
+#        menus/glass/VRR -> game mode -> screenshots/UI tweaks -> Discord
+#        workspace/rishot removal -> clipboard scrolling -> logout.
 #   6. Final palette render and a verification pass.
 #
 # Usage:
 #   ./install.sh                 interactive
-#   ./install.sh --yes           non-interactive
+#   ./install.sh --yes           skip the installer prompt (Hermes still asks)
 #   ./install.sh --check         report only, change nothing
 #   ./install.sh --dry-run       preflight + print the plan
 #   ./install.sh --skip-base     never touch the Ricelin checkout
@@ -43,9 +46,10 @@
 # 23 NVIDIA, 24 SDDM package, 25 SDDM theme, 26 a customisation step,
 # 27 verification.
 #
-# This file is self-contained: every stage is a function in this file. It does
-# not generate temporary scripts and does not call any external standalone
-# scripts.
+# This file is self-contained: every installation stage is a function in this
+# file. It does not depend on a separate stage-script directory, but it does
+# install helper scripts/units and invokes the upstream Ricelin, torii and
+# Hermes installers.
 
 set -Eeuo pipefail
 
@@ -64,7 +68,7 @@ NO_NVIDIA=0
 VERBOSE=0
 
 STEP=0
-TOTAL=41
+TOTAL=46
 PF_FAIL=0
 PF_WARN=0
 PF_CODE=10
@@ -100,15 +104,42 @@ ui_warn() { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 ui_fail() { printf '  %s✗%s %s\n' "$RED" "$RESET" "$1"; }
 ui_skip() { printf '  %s↷%s %s\n' "$DIM" "$RESET" "$1"; }
 ui_plan() { printf '  %s·%s would %s\n' "$DIM" "$RESET" "$1"; }
-ui_say()  { printf '%s\n' "$1"; }
+
+# Write stdin to a file atomically. The temporary file is created beside the
+# destination so the final rename stays on the same filesystem.
+write_atomic() {
+    local path=$1 mode=${2:-0644}
+    local dir tmp
+    dir=$(dirname -- "$path")
+    tmp=$(mktemp "$dir/.$(basename -- "$path").XXXXXX") || return 1
+    if cat > "$tmp"; then
+        chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
+        mv -f -- "$tmp" "$path"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
 
 # --------------------------------------------------------------- logging
 LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ricelin-installer"
 LOG=""
 setup_log() {
-    mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="${TMPDIR:-/tmp}"
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    if mkdir -p "$LOG_DIR" 2>/dev/null; then
+        if [ ! -L "$LOG_DIR" ] && [ -O "$LOG_DIR" ]; then
+            chmod 700 "$LOG_DIR" 2>/dev/null || true
+        fi
+    else
+        LOG_DIR="${TMPDIR:-/tmp}"
+    fi
     LOG="$LOG_DIR/install-$(date +%Y%m%d-%H%M%S).log"
     : > "$LOG" 2>/dev/null || LOG="${TMPDIR:-/tmp}/ricelin-installer-$$.log"
+    : > "$LOG" 2>/dev/null || true
+    chmod 600 "$LOG" 2>/dev/null || true
+    umask "$old_umask"
     printf 'Ricelin installer log: %s\n' "$LOG"
 }
 
@@ -160,7 +191,7 @@ fail_step() {
             hint="Check the clone at $RICELIN_DIR and run its installer by hand: sh \"$RICELIN_DIR/install.sh\" --quickstart --sddm" ;;
         *"Packages"*)
             code=22
-            hint="Check pacman/yay and the network, then re-run. AUR packages are zen-browser-bin and nvibrant-bin." ;;
+            hint="Check pacman/yay and the network, then re-run. This step installs zen-browser-bin; nvibrant-bin is installed by the vibrance step." ;;
         *"SDDM package"*)
             code=24
             hint="Install SDDM by hand with: $ROOT_CMD pacman -S --needed sddm" ;;
@@ -349,10 +380,10 @@ preflight() {
     [ "$missing_cmd" = 0 ] && pf_ok "Base tools: git, curl, python3, jq"
 
     avail=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
-    if [ "${avail:-0}" -lt 1048576 ]; then
-        pf_fail "Less than 1 GiB free under $HOME; free space before installing." 10
-    elif [ "${avail:-0}" -lt 5242880 ]; then
-        pf_warn "Only $((avail / 1024)) MiB free under $HOME; the base and Zen need room."
+    if [ "${avail:-0}" -lt 3145728 ]; then
+        pf_fail "Less than 3 GiB free under $HOME; free space before installing." 10
+    elif [ "${avail:-0}" -lt 8388608 ]; then
+        pf_warn "Only $((avail / 1024)) MiB free under $HOME; 8 GiB is recommended with Hermes Desktop."
     else
         pf_ok "Disk: $((avail / 1024)) MiB free under $HOME"
     fi
@@ -504,9 +535,6 @@ install_packages() {
     if ! pkg_installed zen-browser-bin && ! command -v zen-browser >/dev/null 2>&1; then
         need_aur=1
     fi
-    if [ "$VIBRANT_OK" = 1 ] && ! command -v nvibrant >/dev/null 2>&1; then
-        need_aur=1
-    fi
 
     if [ "$need_aur" = 1 ]; then
         ensure_aur_helper || {
@@ -515,9 +543,6 @@ install_packages() {
         }
         if ! pkg_installed zen-browser-bin && ! command -v zen-browser >/dev/null 2>&1; then
             aur_install zen-browser-bin || return 1
-        fi
-        if [ "$VIBRANT_OK" = 1 ] && ! command -v nvibrant >/dev/null 2>&1; then
-            aur_install nvibrant-bin || return 1
         fi
     fi
 }
@@ -541,23 +566,7 @@ if [ -x "$HOME/.local/bin/hermes" ] && { [ -x "$desktop" ] || [ -f "$launcher" ]
     exit 0
 fi
 
-command -v curl >/dev/null 2>&1 || {
-    printf 'curl is required to install Hermes.\n' >&2
-    exit 1
-}
-command -v git >/dev/null 2>&1 || {
-    printf 'git is required to install Hermes.\n' >&2
-    exit 1
-}
-
-local tmp
-tmp=$(mktemp "${TMPDIR:-/tmp}/hermes-install.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$tmp" || {
-    printf 'Could not download the Hermes installer.\n' >&2
-    exit 1
-}
-bash "$tmp" --include-desktop
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --include-desktop
 )
 
 install_sddm() {
@@ -601,6 +610,15 @@ apply_screenshots() {
     run_quiet "screenshot user phase" stage_screenshot_binds || return 1
 }
 
+apply_remove_rishot() {
+    # The checkout installs under $HOME; a distro/AUR package needs root. Only
+    # ask for it when a package is really present.
+    if pacman -Qq 2>/dev/null | grep -qiE '^rishot($|-git$)'; then
+        run_quiet "rishot package removal" run_root_stage stage_remove_rishot --root || true
+    fi
+    run_quiet "rishot user files" stage_remove_rishot || return 1
+}
+
 apply_logout() {
     run_quiet "logout root phase" run_root_stage stage_logout --root || return 1
     run_quiet "logout user phase" stage_logout || return 1
@@ -634,6 +652,14 @@ verify_report() {
     else
         ui_fail "SDDM: not installed or not enabled"; fatal=$((fatal + 1))
     fi
+    dm_target=$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)
+    case "$dm_target" in
+        */sddm.service) ui_ok "Display manager: SDDM owns display-manager.service" ;;
+        *)              ui_fail "Display manager: ${dm_target:-unset} (expected SDDM)"; fatal=$((fatal + 1)) ;;
+    esac
+    for unit in gdm.service gdm3.service greetd.service lxdm.service slim.service xdm.service ly.service cosmic-greeter.service mdm.service entrance.service; do
+        systemctl is-enabled --quiet "$unit" 2>/dev/null && ui_warn "Other display manager still enabled: $unit"
+    done || true
 
     theme=$(grep -h '^Current=' "$SDDM_CONF_DIR"/*.conf 2>/dev/null | tail -n1 | cut -d= -f2- || true)
     if [ "$theme" = "ricelin" ] && [ -f /usr/share/sddm/themes/ricelin/Main.qml ]; then
@@ -655,7 +681,20 @@ verify_report() {
         ui_ok "SDDM config: no stale conf.d backups"
     fi
 
-    for p in lightdm firefox dolphin; do
+    lightdm_left=$(pacman -Qq 2>/dev/null | grep -i lightdm | tr '\n' ' ' || true)
+    if [ -n "$lightdm_left" ]; then
+        ui_fail "LightDM packages: still installed (${lightdm_left% })"; fatal=$((fatal + 1))
+    else
+        ui_ok "LightDM packages: removed"
+    fi
+    lightdm_left_file=$(find /etc /var/lib /usr/share /usr/lib -maxdepth 8 \
+        -iname '*lightdm*' -not -path '/var/lib/pacman/*' -print -quit 2>/dev/null || true)
+    if [ -n "$lightdm_left_file" ]; then
+        ui_fail "LightDM files: still present ($lightdm_left_file)"; fatal=$((fatal + 1))
+    else
+        ui_ok "LightDM files: removed"
+    fi
+    for p in firefox dolphin; do
         if pkg_installed "$p"; then
             ui_fail "$p: still installed"; fatal=$((fatal + 1))
         else
@@ -969,6 +1008,60 @@ PY
     else
         ui_warn "Thunar network section: not disabled/pinned"
     fi
+    if grep -q 'ghostty --working-directory=' "$HOME/.config/Thunar/uca.xml" 2>/dev/null; then
+        ui_ok "Thunar: Open Terminal Here opens ghostty"
+    else
+        ui_warn "Thunar: Open Terminal Here does not target ghostty"
+    fi
+    if [ -f "$HOME/.config/fish/config.fish" ] \
+        && ! grep -q 'cachyos-fish-config' "$HOME/.config/fish/config.fish" 2>/dev/null \
+        && grep -q 'fish_add_path' "$HOME/.config/fish/config.fish" 2>/dev/null; then
+        ui_ok "Fish: no CachyOS source, local bin on PATH"
+    else
+        ui_warn "Fish: config still sources CachyOS or lacks fish_add_path"
+    fi
+    if grep -qi 'discord' "$HOME/.config/hypr/modules/spaces.lua" 2>/dev/null; then
+        ui_warn "Special workspaces: a Discord workspace is still present"
+    else
+        ui_ok "Special workspaces: no Discord workspace"
+    fi
+    if [ -e "$HOME/.local/share/rishot" ] || [ -e "$HOME/.config/rishot" ] \
+        || [ -e "$HOME/.cache/rishot" ] || [ -e "$HOME/.local/state/rishot" ] \
+        || [ -e "$HOME/.local/bin/rishot" ] \
+        || [ -e "$HOME/.local/share/applications/rishot.desktop" ] \
+        || pacman -Qq 2>/dev/null | grep -qiE '^rishot($|-git$)'; then
+        ui_warn "rishot: files or package still present"
+    elif grep -Rq 'rishot' "$HOME/.config/hypr/hyprland.lua" \
+        "$HOME/.config/hypr/modules" "$HOME/.config/hypr/rishot.lua" 2>/dev/null; then
+        ui_warn "rishot: a bind or require is still present"
+    else
+        ui_ok "rishot: removed"
+    fi
+    if [ -f "$HOME/.local/lib/peakguard.py" ] \
+        && [ -x "$HOME/.local/bin/peak-guard" ] \
+        && [ -x "$HOME/.local/bin/ricelin-model-route" ] \
+        && [ -f "$HOME/.hermes/plugins/peak-guard/plugin.yaml" ] \
+        && [ -f "$HOME/.config/opencode/plugins/peak-guard/index.ts" ]; then
+        if systemctl --user is-enabled --quiet ricelin-model-route.timer 2>/dev/null; then
+            if systemctl --user is-active --quiet ricelin-model-route.timer 2>/dev/null; then
+                ui_ok "Model routing: free first, Go off-peak, peak enforced (timer active)"
+            else
+                ui_warn "Model routing: timer enabled but not active"
+            fi
+        else
+            ui_warn "Model routing: timer not enabled"
+        fi
+        if grep -qE '"model": "(opencode|opencode-go)/deepseek-v4\.1-flash' \
+            "$HOME/.config/opencode/opencode.json" 2>/dev/null \
+            && grep -qE '^  default: "deepseek-v4\.1-flash(-free)?"' \
+            "$HOME/.hermes/config.yaml" 2>/dev/null; then
+            ui_ok "Model routing: OpenCode and Hermes point at DeepSeek V4.1 Flash"
+        else
+            ui_warn "Model routing: one config is missing the DeepSeek model"
+        fi
+    else
+        ui_warn "Model routing: peak-guard, router or plugin missing"
+    fi
     if grep -q 'XCURSOR_SIZE.*12' "$HOME/.config/hypr/modules/env.lua" 2>/dev/null; then
         ui_ok "Cursor: 12 px"
     else
@@ -1005,7 +1098,8 @@ Ricelin desktop installer
 
 Usage: ./install.sh [options]
 
-  -y, --yes             run without the confirmation prompt
+  -y, --yes             run without the installer confirmation prompt
+                        (Hermes still runs its own interactive setup wizard)
       --check           report what is installed; change nothing
       --dry-run         run preflight and print the plan; change nothing
       --skip-base       do not clone or run the Ricelin base installer
@@ -1048,8 +1142,8 @@ confirm() {
         fail_with 10 "No controlling terminal for confirmation." "Re-run with --yes for a non-interactive install."
     fi
     printf '\nThis will install packages (including OpenCode), run the\n'
-    printf 'Ricelin base installer if needed, apply the rice customisations, and\n'
-    printf 'remove LightDM, Firefox and Dolphin.\n'
+    printf 'Ricelin base installer if needed, apply the rice customisations,\n'
+    printf 'remove LightDM, Firefox and Dolphin, and disable other display managers.\n'
     printf 'Dolphin demo files, if present, are removed by the system-integration step.\n\n'
     local answer
     read -r -p "Continue? [y/N] " answer
@@ -1062,7 +1156,8 @@ confirm() {
 run_root_stage() {
     local fn=$1; shift
     local def
-    def=$(declare -f "$fn") || return 1
+    def=$(declare -f write_atomic) || return 1
+    def+=$'\n'"$(declare -f "$fn")" || return 1
     as_root bash -c "$def
 $fn \"\$@\"" bash "$@"
 }
@@ -1094,15 +1189,16 @@ main() {
     else
         run_step "Ricelin base (clone/update + install.sh --quickstart --sddm)" bootstrap_ricelin
     fi
-    run_step "Packages (Thunar stack, greeter tools, Zen, OpenCode, nvibrant)" install_packages
+    run_step "Packages (Thunar stack, greeter tools, Zen, OpenCode)" install_packages
     run_step_stream "Hermes Agent + Desktop" install_hermes
     run_step "SDDM package + $SDDM_CONF_DIR" install_sddm
     run_step "torii SDDM theme (configs/sddm/themes/torii)" install_torii_theme
 
     # 2. System handover and login screen. Settle on one display manager,
     #    browser and file manager before the theme is layered on top.
-    run_step "System integration (SDDM, Thunar, remove LightDM/Firefox/Dolphin)" apply_system_integration
+    run_step "System integration (SDDM, remove LightDM/Firefox/Dolphin)" apply_system_integration
     run_step "Diff-only Ricelin updater" stage_diff_only_update
+    run_step "Atomic theme writes" stage_atomic_theme_write
     run_step "SDDM palette copy + Xsetup" apply_sddm_match
     run_step "Greeter refresh rate + cursor" run_root_stage stage_greeter_display --root
 
@@ -1126,30 +1222,33 @@ main() {
     run_step "Hermes desktop integration" stage_hermes_skin
     run_step "Hermes desktop log quieting" stage_hermes_logs
     run_step "AI agent pill activity" stage_agent_activity
+    run_step "Model routing (free first, Go off-peak)" stage_model_route
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
+    run_step "Fish config (no CachyOS source, local bin)" stage_fish_config
     run_step "Portal colour-scheme sync" stage_portal_scheme
     run_step "Zen wallpaper colours" stage_zen_colors
     run_step "One-tone terminal palette" stage_one_tone_palette
     run_step "Thunar integration" stage_thunar
+    run_step "Thunar Open Terminal Here (ghostty)" stage_thunar_terminal_action
     run_step "Hyprtoolkit / polkit palette" stage_hyprtoolkit_palette
     run_step "Night-light cursor" stage_nightlight_cursor
     run_step "Wallpaper tone control" stage_wallpaper_tone
     run_step "Wallpaper strip centering" stage_wallpaper_center
     run_step "Lock screen palette" stage_lock_theme
     run_step "Settings zoom" stage_settings_zoom
-    run_step "Atomic theme writes" stage_atomic_theme_write
     run_step "Wallcolors render cache" stage_wallcolors_cache
     run_step "Pretty menus" stage_pretty_menus
     run_step "App glass" stage_app_glass
     run_step "VRR / adaptive refresh" stage_hypr_vrr
     run_step "Game-mode opacity" stage_gamemode_opaque
-    run_step "Trim unused background services" stage_background_services
 
     # 5. Desktop behaviour.
     run_step "Screenshot binds + hyprshot" apply_screenshots
-    run_step "UI tweaks (cursor 12, Q binds, Thunar double-click)" stage_ui_tweaks
+    run_step "UI tweaks (cursor 12, Q binds)" stage_ui_tweaks
+    run_step "Remove the Discord special workspace" stage_spaces_no_discord
+    run_step "Remove rishot (files, binds, package)" apply_remove_rishot
     run_step "Smooth clipboard scrolling" stage_clipboard_scroll
     run_step "Logout to SDDM" apply_logout
 
@@ -1191,7 +1290,7 @@ sleep_hook=/usr/lib/systemd/system-sleep/ricelin-nvidia-fan
 
 install -d -m 755 /usr/local/lib/ricelin /usr/lib/systemd/system-sleep
 
-cat > "$helper" <<'HELPER'
+write_atomic "$helper" 0755 <<'HELPER'
 #!/bin/sh
 # Set every fan of GPU 0 to 75%.
 #
@@ -1271,10 +1370,7 @@ try_all || {
 }
 HELPER
 
-chmod 755 "$helper"
-chown root:root "$helper"
-
-cat > "$service" <<'UNIT'
+write_atomic "$service" 0644 <<'UNIT'
 [Unit]
 Description=Set NVIDIA GPU fans to 75%
 After=display-manager.service
@@ -1293,7 +1389,7 @@ RemainAfterExit=yes
 WantedBy=graphical.target
 UNIT
 
-cat > "$sleep_hook" <<'HOOK'
+write_atomic "$sleep_hook" 0755 <<'HOOK'
 #!/bin/sh
 # Reapply NVIDIA fan control after resume; the driver may reset it.
 set -eu
@@ -1301,11 +1397,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 [ "${1:-}" = "post" ] || exit 0
 systemctl --no-block restart nvidia-fan.service
 HOOK
-
-chmod 644 "$service"
-chown root:root "$service"
-chmod 755 "$sleep_hook"
-chown root:root "$sleep_hook"
 
 # Older installs used a 30-second timer. Remove it so the polling stops.
 systemctl disable --now nvidia-fan.timer >/dev/null 2>&1 || true
@@ -1570,7 +1661,10 @@ while IFS= read -r profile; do
         rm -f "$css".bak.*
     fi
     if ! cmp -s "$tmp" "$css" 2>/dev/null; then
-        cat "$tmp" > "$css"
+        tmpcss="$css.tmp"
+        cp "$tmp" "$tmpcss"
+        chmod 644 "$tmpcss"
+        mv -f "$tmpcss" "$css"
     fi
     chmod 644 "$css" 2>/dev/null || true
 
@@ -1616,9 +1710,8 @@ stage_one_tone_palette() (
 # `ricelin update` rewrites wallcolors.py from upstream and drops it, so a run
 # after an update re-installs it. Applying twice is a no-op.
 #
-# Usage:
-#   sh installer stage            apply
-#   sh installer stage --revert   back to the dark terminal and stronger blur
+# install.sh applies this stage. A direct --revert restores the dark terminal
+# and the stronger blur.
 #
 # The revert writes a marker file that wallcolors.py checks, so nothing is lost:
 # the older scheme is still in the script and can be switched back on any time.
@@ -1825,6 +1918,10 @@ if text != original:
     tmp = path + ".05.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
     print(f"wallcolors.py: terminal engine {verb}")
 else:
@@ -1859,11 +1956,11 @@ echo
 echo "Run with --revert to switch back."
 )
 
-# ---------------------------------------------------------------- stage_thunar
+# ---------------------------------------------------------------- stage_kde_fish_palette
 stage_kde_fish_palette() (
 # Keep KDE/Qt apps and the fish greeting on the live wallpaper palette.
-# This is the embedded copy of 19-kde-fish-palette.sh; see that script for
-# the full rationale. It only touches sources under the user's home.
+# This is the embedded KDE/fish palette stage. It only touches sources under
+# the user's home.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
@@ -2073,6 +2170,10 @@ if text != original:
     tmp = wc + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(wc).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, wc)
 
 # ---------------------------------------------------------------- fish greeting
@@ -2126,6 +2227,10 @@ if text != original:
     tmp = fish + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(fish).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, fish)
 
 print(("Applied" if apply else "Reverted") + ": KDE/Qt and fish follow the palette.")
@@ -2151,6 +2256,7 @@ else
 fi
 )
 
+# ---------------------------------------------------------------- stage_thunar
 stage_thunar() (
 # Make Thunar match the Ricelin desktop.
 #
@@ -2174,8 +2280,8 @@ stage_thunar() (
 # It also aligns the global GTK UI font, since Thunar inherits it. The icon
 # theme is deliberately left alone: it is a desktop-wide choice, not Thunar's.
 #
-# Everything is recorded in ~/.local/state/ricelin/thunar-match.json first, and
-# `installer stage --revert` puts the machine back exactly as it was.
+# Everything is recorded in ~/.local/state/ricelin/thunar-match.json first, so
+# a direct --revert puts the machine back exactly as it was.
 
 set -eu
 
@@ -2357,6 +2463,10 @@ def save(path: Path, text: str) -> None:
     """Write through a temp file, so a reader never sees a truncated theme."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 
 
@@ -3090,7 +3200,7 @@ stage_nightlight_cursor() (
 # That is `cursor:no_hardware_cursors = 1` in ~/.config/hypr/modules/input.lua,
 # where 1 forces software cursors and 2 is the default "auto".
 #
-# `installer stage --revert` removes the setting and restores the default.
+# A direct --revert removes the setting and restores the default.
 
 set -eu
 
@@ -3110,6 +3220,10 @@ def save(content):
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(content)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 
 anchor = '    binds = {\n        scroll_event_delay = 40,\n    },\n})'
@@ -3174,7 +3288,7 @@ stage_wallpaper_tone() (
 # the terminal accents and fastfetch) already reads the resulting surface, so
 # forcing the branch is the whole engine change.
 #
-# `installer stage --revert` removes the store, the flag and every edit.
+# A direct --revert removes the store, the flag and every edit.
 
 set -eu
 
@@ -3520,6 +3634,10 @@ if isinstance(data, dict):
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(keep, fh)
+        try:
+            os.chmod(tmp, os.stat(p).st_mode)
+        except OSError:
+            pass
         os.replace(tmp, p)
         print(f"apply: analyze cache trimmed {len(data) - len(keep)} stale entries")
 PY
@@ -3556,8 +3674,8 @@ stage_settings_zoom() (
 #
 # The window stays adjustable in-app: Ctrl + wheel, or Ctrl + -/+/0.
 #
-# `installer stage --revert` puts it back to the shipped 0.85 in both
-# places. Set SETTINGS_ZOOM to another value to apply that instead.
+# A direct --revert puts it back to the shipped 0.85 in both places. Set
+# SETTINGS_ZOOM to another value to apply that instead.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -3614,6 +3732,10 @@ for path, pattern, repl in patterns:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(out)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)
+        except OSError:
+            pass
         os.replace(tmp, path)
         changed.append(path)
 if changed:
@@ -3636,9 +3758,7 @@ stage_atomic_theme_write() (
 # readers see either the old complete file or the new complete file, never a
 # partial one.
 #
-# Usage:
-#   sh installer stage            patch wallcolors.py
-#   sh installer stage --revert   restore the in-place write
+# install.sh applies this stage. A direct --revert restores the in-place write.
 
 set -eu
 PY=/usr/bin/python3
@@ -3648,6 +3768,7 @@ SCRIPT="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/wallcolors.py"
 
 "$PY" - "$SCRIPT" "${1:-apply}" <<'PY'
 import os
+import re
 import sys
 
 path, mode = sys.argv[1], sys.argv[2]
@@ -3658,6 +3779,10 @@ def save(text):
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 
 OLD = """    path.parent.mkdir(parents=True, exist_ok=True)
@@ -3666,6 +3791,19 @@ OLD = """    path.parent.mkdir(parents=True, exist_ok=True)
 """
 
 NEW = """    path.parent.mkdir(parents=True, exist_ok=True)
+    # ricelin-atomic-theme-write: running apps reload this file the moment the
+    # theme name flips, so never let them read a truncated file.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return True
+"""
+
+NEW_PREVIOUS = """    path.parent.mkdir(parents=True, exist_ok=True)
     # ricelin-atomic-theme-write: running apps reload this file the moment the
     # theme name flips, so never let them read a truncated file.
     tmp = path.with_name(path.name + ".tmp")
@@ -3680,18 +3818,31 @@ if mode in ("--revert", "-r", "revert"):
     if MARK not in src:
         print("Already in-place; nothing to revert.")
         sys.exit(0)
-    src = src.replace(NEW, OLD)
+    if NEW in src:
+        src = src.replace(NEW, OLD)
+    elif NEW_PREVIOUS in src:
+        src = src.replace(NEW_PREVIOUS, OLD)
+    else:
+        print("Could not locate the atomic write block; wallcolors.py changed.", file=sys.stderr)
+        sys.exit(1)
     save(src)
     print("Restored the in-place write.")
     sys.exit(0)
 
-if MARK in src:
+if NEW in src:
     print("Already atomic; nothing to do.")
     sys.exit(0)
+if NEW_PREVIOUS in src:
+    save(src.replace(NEW_PREVIOUS, NEW))
+    print("Upgraded the atomic write to preserve file mode.")
+    sys.exit(0)
+if MARK in src:
+    print("Could not recognise the atomic write block; wallcolors.py changed.", file=sys.stderr)
+    sys.exit(1)
 if OLD not in src:
     print("Could not find the write_if_changed body; wallcolors.py changed.", file=sys.stderr)
     sys.exit(1)
-if "\nimport os" not in src and "\nimport os," not in src:
+if not re.search(r"(?m)^import os\b", src):
     print("os is not imported in wallcolors.py; refusing to patch.", file=sys.stderr)
     sys.exit(1)
 save(src.replace(OLD, NEW))
@@ -3711,7 +3862,8 @@ stage_wallcolors_cache() (
 # wallcolors.py calls matugen() several times per run (surface palette, dark and
 # light base16, the terminal wheel). Each call spawns matugen and parses JSON.
 # The result for a given source hex and mode is pure, so a small LRU keeps a
-# palette render to one subprocess per mode instead of one per caller.
+# palette render to one subprocess per mode instead of one per caller. The
+# public matugen() returns a deep copy so a caller cannot mutate the cache.
 #
 # The same render also rewrites colors.json and hypr-colors.lua even when the
 # palette has not changed. write_if_changed skips the disk write, and the live
@@ -3731,6 +3883,16 @@ path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
 original = src
 
+if not re.search(r"(?m)^import copy\b", src):
+    match = re.search(r"(?m)^import fcntl\b", src)
+    if match:
+        src = src[:match.end()] + "\nimport copy" + src[match.end():]
+    else:
+        match = re.search(r"(?m)^import [^\n]+\n", src)
+        if not match:
+            sys.exit("wallcolors.py: no import block to extend")
+        src = src[:match.end()] + "import copy\n" + src[match.end():]
+
 if not re.search(r"(?m)^import functools\b", src):
     match = re.search(r"(?m)^import fcntl\b", src)
     if match:
@@ -3741,10 +3903,32 @@ if not re.search(r"(?m)^import functools\b", src):
             sys.exit("wallcolors.py: no import block to extend")
         src = src[:match.end()] + "import functools\n" + src[match.end():]
 
-if not re.search(r"@functools\.lru_cache\([^)]*\)\s*\ndef matugen\(", src):
-    if not re.search(r"(?m)^def matugen\(", src):
+# Older installs cached matugen directly. Remove that decorator so the wrapper
+# below is the single cache entry point.
+src = re.sub(r"(?m)^@functools\.lru_cache\([^)]*\)\n(?=def matugen\()", "", src, count=1)
+
+CACHE_MARK = "# ricelin-matugen-cache"
+if CACHE_MARK not in src:
+    match = re.search(r"(?m)^((?:@[^\n]*\n)*)def matugen\(([^)]*)\):", src)
+    if not match:
         sys.exit("wallcolors.py: matugen() is missing")
-    src = re.sub(r"(?m)^def matugen\(", "@functools.lru_cache(maxsize=8)\ndef matugen(", src, count=1)
+    decorators, params = match.group(1), match.group(2).strip()
+    if "mode" in params:
+        signature = 'source_hex, mode="dark"'
+        call = "source_hex, mode"
+    else:
+        signature = "source_hex"
+        call = "source_hex"
+    wrapper = (
+        f"{CACHE_MARK}\n"
+        f"@functools.lru_cache(maxsize=8)\n"
+        f"def _matugen_cached({signature}):\n"
+        f"    return _matugen({call})\n\n\n"
+        f"def matugen({signature}):\n"
+        f"    return copy.deepcopy(_matugen_cached({call}))\n\n\n"
+        f"{decorators}def _matugen({params}):"
+    )
+    src = src[:match.start()] + wrapper + src[match.end():]
 
 COLORS_OLD = r'''    (CACHE / "colors.json").write_text(json.dumps(pill, indent=2) + "\n")
 '''
@@ -3792,6 +3976,10 @@ if src == original:
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     fh.write(src)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 print("wallcolors.py: render cache installed")
 PY
@@ -3818,12 +4006,10 @@ stage_pretty_menus() (
 #   3. The document font was "Adwaita Sans 12" while the UI font is Inter 10, so
 #      text that resolves through the document font did not match.
 #
-# GTK3 menu styling still comes from installer stage; this script only
-# removes the stale GTK3 theme pin.
+# GTK3 menu styling still comes from the Thunar integration stage; this stage
+# only removes the stale GTK3 theme pin.
 #
-# Usage:
-#   sh installer stage            apply
-#   sh installer stage --revert   restore the previous state
+# install.sh applies this stage. A direct --revert restores the previous state.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -3908,6 +4094,10 @@ tmp = state_file + ".tmp"
 with open(tmp, "w") as fh:
     json.dump(state, fh, indent=2)
     fh.write("\n")
+try:
+    os.chmod(tmp, os.stat(state_file).st_mode)
+except OSError:
+    os.chmod(tmp, 0o644)
 os.replace(tmp, state_file)
 PY
 }
@@ -3933,6 +4123,10 @@ else:
 tmp = path + ".tmp"
 with open(tmp, "w") as fh:
     fh.write(src)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 PY
 }
@@ -3952,6 +4146,10 @@ out = (head + "\n\n" if head else "") + body + "\n"
 tmp = path + ".tmp"
 with open(tmp, "w") as fh:
     fh.write(out)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    os.chmod(tmp, 0o644)
 os.replace(tmp, path)
 PY
 }
@@ -3969,6 +4167,10 @@ out = "\n".join(lines).strip()
 tmp = path + ".tmp"
 with open(tmp, "w") as fh:
     fh.write(out + "\n" if out else "")
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 PY
     done
@@ -3984,6 +4186,10 @@ src = open(path).read().replace("        popups = true,\n", "")
 tmp = path + ".tmp"
 with open(tmp, "w") as fh:
     fh.write(src)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 PY
     "$py" - "$GTK4_CSS" "$MARK" <<'PY'
@@ -3999,6 +4205,10 @@ if mark in text:
         tmp = path + ".tmp"
         with open(tmp, "w") as fh:
             fh.write(head + "\n")
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)
+        except OSError:
+            pass
         os.replace(tmp, path)
     else:
         # It held nothing but this block, so removing the block removes the file.
@@ -4017,6 +4227,10 @@ for key, ini in (("gtk4_ini", sys.argv[2]), ("gtk3_ini", sys.argv[3])):
         tmp = ini + ".tmp"
         with open(tmp, "w") as fh:
             fh.write(old)
+        try:
+            os.chmod(tmp, os.stat(ini).st_mode)
+        except OSError:
+            os.chmod(tmp, 0o644)
         os.replace(tmp, ini)
 PY
         rm -f "$STATE"
@@ -4064,7 +4278,8 @@ path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
 match = re.search(r"\bmisc\s*=\s*\{", src)
 if not match:
-    sys.exit("decoration.lua: misc table is missing")
+    print("decoration.lua: misc table is missing; skipping VRR", file=sys.stderr)
+    sys.exit(0)
 
 start = match.end()
 depth = 1
@@ -4076,7 +4291,8 @@ while i < len(src) and depth:
         depth -= 1
     i += 1
 if depth:
-    sys.exit("decoration.lua: misc table is unbalanced")
+    print("decoration.lua: misc table is unbalanced; skipping VRR", file=sys.stderr)
+    sys.exit(0)
 
 body = src[start:i - 1]
 if re.search(r"(?m)^\s*vrr\s*=", body):
@@ -4092,6 +4308,10 @@ if updated == src:
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     fh.write(updated)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 print("decoration.lua: misc:vrr = 1")
 PY
@@ -4124,7 +4344,7 @@ stage_app_glass() (
 # wins over a decoration default, so leaving them live would mean two controls for
 # one value with only one of them doing anything.
 #
-# `--revert` removes all of it and puts the Opacity group back in charge.
+# A direct --revert removes all of it and puts the Opacity group back in charge.
 # Applying twice is a no-op.
 
 set -eu
@@ -4520,7 +4740,7 @@ EDITS = [
      rules_block + 'hl.window_rule({\n    name           = "suppress-maximize",'),
 ]
 
-# 12-settings-zoom may already have changed the shipped zoom, so anchor the
+# The settings-zoom stage may already have changed the shipped zoom, so anchor the
 # glass flag block on whichever declaration is live instead of the old 0.85.
 _flags = qml / "Singletons/Flags.qml"
 _flags_text = _flags.read_text(encoding="utf-8")
@@ -4562,6 +4782,10 @@ for path, text in texts.items():
     tmp = path.with_name(path.name + ".20.tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
     print(f"{mode}: {path}")
 
@@ -4601,7 +4825,7 @@ stage_gamemode_opaque() (
 #
 # Two layers of transparency have to go, and they work differently:
 #
-#   window rules    every app carries the 0.90 opacity rule from 20. A rule
+#   window rules    every app carries the 0.90 opacity rule from app glass. A rule
 #                   cannot be removed at runtime, so this flips the pill's rule
 #                   file to `enabled = false` and reloads Hyprland once.
 #   decoration      active/inactive opacity are forced to 1.00 for the duration
@@ -4612,11 +4836,12 @@ stage_gamemode_opaque() (
 #
 # `gamemode.sh on|off` stays the interface, so the pill (GameMode.qml) and any
 # keybind keep calling the same thing. The pill's renderer already writes
-# `enabled = false` while `Flags.gameMode` is on (20 owns that guard), so
+# `enabled = false` while `Flags.gameMode` is on (app glass owns that guard), so
 # touching the opacity slider mid-game cannot bring the frost back.
 #
-# `--revert` restores the upstream `gamemode.sh` byte for byte. Applying twice is
-# a no-op. Run 20 first: without its rule file there is nothing to disable.
+# A direct --revert restores the upstream `gamemode.sh` byte for byte. Applying twice is
+# a no-op. Run the app-glass stage first: without its rule file there is
+# nothing to disable.
 
 set -eu
 
@@ -4795,10 +5020,10 @@ else
 fi
 )
 
-# ---------------------------------------------------------------- stage_system_integration
+# ---------------------------------------------------------------- stage_sddm_palette
 stage_sddm_palette() (
 # Install the palette-driven Ricelin SDDM theme and hook it into wallcolors.py.
-# This is the embedded copy of 15-sddm-match.sh; the root phase copies torii and
+# This is the embedded SDDM palette stage; the root phase copies torii and
 # the user phase patches the QML and the palette renderer.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -4842,12 +5067,10 @@ if [ "${1:-}" = "--root" ]; then
     chown -R "$user:$group" "$THEME_DIR"
     chmod 755 "$THEME_DIR"
 
-    install -d -m 755 /etc/sddm.conf.d
-    cat > "$CONF" <<CONF
+    write_atomic "$CONF" 0644 <<CONF
 [Theme]
 Current=$THEME_NAME
 CONF
-    chmod 644 "$CONF"
     echo "Installed the palette-driven SDDM theme at $THEME_DIR."
     exit 0
 fi
@@ -4875,6 +5098,10 @@ def save(content):
     tmp = p + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(content)
+    try:
+        os.chmod(tmp, os.stat(p).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, p)
 
 
@@ -4894,7 +5121,7 @@ old = '''    readonly property color verm: cfg("accent", "#c0442b")
     readonly property color dim: "#aeb3bd"
     readonly property color hairStrong: Qt.rgba(150 / 255, 172 / 255, 212 / 255, 0.32)
     readonly property color emberBase: "#1D120E"'''
-new = '''    // ricelin-sddm: palette-driven, rewritten by 15-sddm-match.sh
+new = '''    // ricelin-sddm: palette-driven, rewritten by install.sh
     readonly property bool bgIsVideo: /\\.(mp4|webm|mkv|mov)$/i.test("" + cfg("background", ""))
     readonly property color verm: cfg("accent", "#c0442b")
     readonly property color vermDeep: cfg("accent_deep", "#a3371f")
@@ -4962,6 +5189,10 @@ def save(content):
     tmp = p + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(content)
+    try:
+        os.chmod(tmp, os.stat(p).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, p)
 
 
@@ -5063,6 +5294,7 @@ fi
 echo "SDDM now follows the desktop palette (visible from the next login)."
 )
 
+# ---------------------------------------------------------------- stage_greeter_display
 stage_greeter_display() (
 # Keep SDDM's greeter on the desktop panel's native mode and cursor.
 #
@@ -5093,7 +5325,7 @@ if [ -z "$home" ] || [ ! -d "$home" ]; then
 fi
 env_lua="$home/.config/hypr/modules/env.lua"
 
-install -d -m 755 /etc/sddm /etc/sddm.conf.d
+install -d -m 755 /etc/sddm
 
 # SDDM loads every regular file in conf.d, so a *.pre-ricelin backup there
 # overrides the active drop-in. Move it somewhere SDDM never reads.
@@ -5110,10 +5342,12 @@ if [ ! -f "$BACKUP" ] && [ -f "$CONF" ] && ! grep -q "$MARK" "$CONF" 2>/dev/null
     cp -a "$CONF" "$BACKUP"
 fi
 
-cat > "$XSETUP" <<'XSETUP_EOF'
+tmp=$(mktemp "${XSETUP}.XXXXXX")
+trap 'rm -f "${tmp:-}"' EXIT
+cat > "$tmp" <<'XSETUP_EOF'
 #!/bin/sh
-# Generated by ricelin-setup/16-greeter-display.sh. Re-run that script instead
-# of editing this file; it is regenerated on every install.
+# Generated by install.sh (stage_greeter_display). Re-run install.sh instead of
+# editing this file; it is regenerated on every install.
 #
 # Run by SDDM on the greeter's own X server, before sddm-greeter starts. Puts
 # the panel back on the resolution/refresh and pointer the desktop session was
@@ -5160,30 +5394,32 @@ Xcursor.theme: $theme
 Xcursor.size: $size
 EOF
 XSETUP_EOF
-chmod 755 "$XSETUP"
-sed -i "s|@ENV_LUA@|$env_lua|" "$XSETUP"
+sed -i "s|@ENV_LUA@|$env_lua|" "$tmp"
+chmod 755 "$tmp"
+mv -f "$tmp" "$XSETUP"
 
-cat > "$CONF" <<CONF
+write_atomic "$CONF" 0644 <<CONF
 # $MARK
 [X11]
 DisplayCommand=$XSETUP
 CONF
-chmod 644 "$CONF"
 
 echo "Greeter display installed: $XSETUP on the native mode at its highest refresh, cursor from $env_lua."
 )
 
+# ---------------------------------------------------------------- stage_system_integration
 stage_system_integration() (
 # Finish the display-manager, browser and file-manager handover, and keep the
 # night light up.
 #
 # Four loose ends from the desktop setup:
 #
-#   display manager  SDDM was installed but LightDM was still enabled and owned
-#                    display-manager.service. This removes every LightDM package,
-#                    config file, user and runtime directory, then enables SDDM
-#                    and points display-manager.service at it. The running
-#                    LightDM session is left alone; SDDM takes over on reboot.
+#   display manager  SDDM was installed but another display manager could still
+#                    own display-manager.service. This removes every installed
+#                    LightDM package and every LightDM file/user, disables the
+#                    other known display managers, and makes SDDM own
+#                    display-manager.service. No running display manager is
+#                    stopped; SDDM takes over on reboot.
 #
 #   browser          Firefox was still installed next to Zen. This removes the
 #                    package, both profile trees and every MIME association that
@@ -5192,21 +5428,20 @@ stage_system_integration() (
 #   file manager     Dolphin was still installed next to Thunar even though
 #                    Thunar is the themed handler. This removes the package,
 #                    its config/cache and every MIME association that still
-#                    names it, then leaves thunar.desktop as the folder handler.
+#                    names it. The Thunar integration stage sets the folder
+#                    handler.
 #
 #   night light      hyprsunset hit systemd's start limit after a crash loop.
 #                    A user drop-in removes the limit and restarts it forever.
 #
-# Usage:
-#   sh installer stage            apply
-#   sh installer stage --check    report only
+# install.sh is the supported entry point. The function still accepts --root,
+# --user and --check for targeted use.
 #
 # No display manager is stopped or restarted here.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-self=$(readlink -f "$0")
 mode=${1:-apply}
 
 # ------------------------------------------------------------------ user phase
@@ -5215,7 +5450,7 @@ if [ "${1:-}" = "--user" ]; then
     override="$config/systemd/user/hyprsunset.service.d/override.conf"
 
     mkdir -p "$(dirname "$override")"
-    cat > "$override" <<'UNIT'
+    write_atomic "$override" 0644 <<'UNIT'
 # Keep the night light alive: a crash must not leave the session permanently
 # cool for the rest of the day.
 [Unit]
@@ -5273,6 +5508,10 @@ if out != text:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(out)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 PY
     done
@@ -5282,9 +5521,8 @@ PY
     zen=$(find /usr/share/applications "$HOME/.local/share/applications" \
         -maxdepth 1 -iname 'zen*.desktop' -printf '%f\n' 2>/dev/null | head -n1)
     [ -n "$zen" ] && xdg-settings set default-web-browser "$zen" >/dev/null 2>&1 || true
-    xdg-mime default thunar.desktop inode/directory >/dev/null 2>&1 || true
 
-    echo "User side: hyprsunset override installed, Firefox and Dolphin profiles and MIME entries removed, Zen and Thunar are the defaults."
+    echo "User side: hyprsunset override installed, Firefox and Dolphin profiles and MIME entries removed, Zen is the default browser."
     exit 0
 fi
 
@@ -5293,7 +5531,16 @@ if [ "$mode" = "--check" ]; then
     readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || echo "  (none)"
     systemctl is-enabled sddm 2>/dev/null || true
     echo "LightDM packages:"
-    pacman -Q lightdm lightdm-slick-greeter eos-lightdm-slick-theme 2>/dev/null || echo "  none installed"
+    lightdm_check=$(pacman -Qq 2>/dev/null | grep -i lightdm || true)
+    if [ -n "$lightdm_check" ]; then
+        printf '  %s\n' "$lightdm_check"
+    else
+        echo "  none installed"
+    fi
+    echo "Other display managers:"
+    for unit in gdm.service gdm3.service greetd.service lxdm.service slim.service xdm.service ly.service cosmic-greeter.service mdm.service entrance.service; do
+        systemctl is-enabled "$unit" >/dev/null 2>&1 && echo "  $unit"
+    done || true
     echo "Firefox packages:"
     pacman -Q firefox 2>/dev/null || echo "  none installed"
     echo "File managers:"
@@ -5305,27 +5552,48 @@ if [ "$mode" = "--check" ]; then
 fi
 
 if [ "$mode" = "--root" ]; then
-    # Remove LightDM first so enabling SDDM can take display-manager.service.
+    # Remove every installed LightDM package. Build the list first: pacman
+    # treats a missing target as an error and aborts the whole transaction.
     systemctl disable lightdm.service >/dev/null 2>&1 || true
-    if pacman -Q lightdm >/dev/null 2>&1 || pacman -Q lightdm-slick-greeter >/dev/null 2>&1 \
-        || pacman -Q eos-lightdm-slick-theme >/dev/null 2>&1; then
-        pacman -Rns --noconfirm lightdm lightdm-slick-greeter eos-lightdm-slick-theme
+    mapfile -t lightdm_pkgs < <(pacman -Qq 2>/dev/null | grep -i 'lightdm' || true)
+    if [ "${#lightdm_pkgs[@]}" -gt 0 ]; then
+        # Do not use -s here: xorg-xrandr/xrdb are installed for the greeter and
+        # may currently be reachable only through the LightDM package tree.
+        pacman -Rn --noconfirm "${lightdm_pkgs[@]}"
     fi
 
+    # Remove every LightDM path a package manager may leave behind.
     rm -rf /etc/lightdm /var/lib/lightdm /var/log/lightdm /var/cache/lightdm /run/lightdm
     rm -rf /var/lib/lightdm-data /run/lightdm.pid /run/systemd/units/invocation:lightdm.service
-    rm -f /var/cache/pacman/pkg/*lightdm*.pkg.tar.zst /var/cache/pacman/pkg/*lightdm*.pkg.tar.zst.sig
-    rm -rf /usr/share/lightdm /usr/lib/lightdm /usr/share/xgreeters/lightdm* 2>/dev/null || true
-    rm -f /etc/pam.d/lightdm /etc/pam.d/lightdm-greeter /etc/pam.d/lightdm-autologin 2>/dev/null || true
-    find /usr/share/icons -maxdepth 4 \( -iname 'lightdm-settings.svg' -o -iname 'lightdm-gtk-greeter-settings.svg' \) -delete 2>/dev/null || true
+    rm -f /var/cache/pacman/pkg/*lightdm*.pkg.tar.*
+    rm -rf /usr/share/lightdm /usr/lib/lightdm /usr/share/xgreeters/lightdm*
+    rm -f /usr/share/xsessions/lightdm*.desktop
+    rm -f /etc/pam.d/*lightdm* /etc/dbus-1/system.d/*lightdm* /usr/share/dbus-1/system-services/*lightdm*
+    rm -f /usr/share/dbus-1/system.d/*lightdm* /etc/polkit-1/rules.d/*lightdm* /etc/apparmor.d/*lightdm*
+    find /usr/share/icons /usr/share/applications /usr/share/pixmaps -maxdepth 4 \
+        -iname '*lightdm*' -exec rm -rf {} + 2>/dev/null || true
+    find /etc/systemd /usr/lib/systemd /usr/lib/systemd/system -maxdepth 3 \
+        -iname '*lightdm*' -exec rm -rf {} + 2>/dev/null || true
+    find /etc /var/lib /var/log /var/cache /usr/share /usr/lib -maxdepth 8 \
+        -iname '*lightdm*' -not -path '/var/lib/pacman/*' -exec rm -rf {} + 2>/dev/null || true
     userdel lightdm >/dev/null 2>&1 || true
     groupdel lightdm >/dev/null 2>&1 || true
 
-    # Only replace the symlink if it is still LightDM's.
-    if readlink -f /etc/systemd/system/display-manager.service 2>/dev/null | grep -q lightdm; then
+    # Disable every other known display manager. Packages and configs stay, so
+    # switching back is still possible; SDDM owns the default target.
+    for unit in gdm.service gdm3.service greetd.service lxdm.service slim.service xdm.service ly.service cosmic-greeter.service mdm.service entrance.service; do
+        systemctl disable "$unit" >/dev/null 2>&1 || true
+    done
+    if { [ -e /etc/systemd/system/display-manager.service ] || [ -L /etc/systemd/system/display-manager.service ]; } \
+        && ! readlink -f /etc/systemd/system/display-manager.service | grep -q '/sddm.service$'; then
         rm -f /etc/systemd/system/display-manager.service
     fi
-    systemctl enable sddm.service
+    systemctl unmask sddm.service >/dev/null 2>&1 || true
+    systemctl enable --force sddm.service
+    if [ ! -e /etc/systemd/system/display-manager.service ] \
+        && [ -f /usr/lib/systemd/system/sddm.service ]; then
+        ln -sf /usr/lib/systemd/system/sddm.service /etc/systemd/system/display-manager.service
+    fi
     systemctl set-default graphical.target >/dev/null
 
     # Firefox and its system-wide leftovers.
@@ -5352,58 +5620,12 @@ if [ "$mode" = "--root" ]; then
     find /etc /var /usr -iname '*lightdm*' -not -path '/var/lib/pacman/*' -not -path '/usr/share/doc/*' \
         -print 2>/dev/null | head -n 20 | sed 's/^/  leftover: /'
 
-    echo "Root side: LightDM removed, SDDM enabled, Firefox and Dolphin removed."
+    echo "Root side: LightDM removed, other display managers disabled, SDDM enabled, Firefox and Dolphin removed."
     exit 0
 fi
 
-# --------------------------------------------------------------- dispatch
-if [ "$(id -u)" -ne 0 ]; then
-    if command -v sudo >/dev/null 2>&1; then
-        sudo "$self" --root
-    elif command -v pkexec >/dev/null 2>&1; then
-        pkexec "$self" --root
-    else
-        echo "Run as root to remove the packages and enable SDDM." >&2
-        exit 1
-    fi
-    exec "$self" --user
-fi
-
-"$self" --root
-echo "Run the user phase as your desktop user: sh $self --user"
-)
-
-# ---------------------------------------------------------------- stage_background_services
-stage_background_services() (
-# Mask unused background portals and phone-volume monitors.
-#
-# gvfs starts one D-Bus service per device class (AFC/iPhone, gphoto2/camera,
-# MTP/Android) even when no such device is attached. The Flatpak document and
-# permission portals are always-on D-Bus activation too; this installer does
-# not install Flatpak, so mask them only when no Flatpak binary is present.
-# at-spi stays enabled: accessibility tools and some toolkits need it.
-set -eu
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-systemctl --user show-environment >/dev/null 2>&1 || {
-    echo "no user systemd session; skipping"
-    exit 0
-}
-
-units="gvfs-afc-volume-monitor.service gvfs-gphoto2-volume-monitor.service gvfs-mtp-volume-monitor.service"
-if ! command -v flatpak >/dev/null 2>&1; then
-    units="$units xdg-document-portal.service xdg-permission-store.service"
-fi
-
-for unit in $units; do
-    if ! systemctl --user list-unit-files --no-legend "$unit" 2>/dev/null | grep -q "^$unit"; then
-        continue
-    fi
-    systemctl --user stop "$unit" >/dev/null 2>&1 || true
-    systemctl --user mask "$unit" >/dev/null 2>&1 || true
-done
-
-echo "Masked unused GVFS/portal services (at-spi left enabled)"
+echo "stage_system_integration: expected --root or --user" >&2
+exit 1
 )
 
 # ---------------------------------------------------------------- stage_screenshot_binds
@@ -5427,10 +5649,8 @@ stage_screenshot_binds() (
 # Settings > Keybinds parses them like every other bind and lets them be
 # renamed, re-keyed or deleted there.
 #
-# Usage:
-#   sh installer stage            apply (binds + user hyprshot)
-#   sh installer stage --root     install the distro package
-#   sh installer stage --revert   remove the binds
+# install.sh applies the bind stage and calls the root phase. A direct --revert
+# removes the binds.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -5520,6 +5740,10 @@ if out != lines:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 PY
 }
@@ -5533,12 +5757,19 @@ write_binds() {
         return 0
     fi
     # Replace older wrapper binds (and any partial direct binds) in place.
+    local mode
+    mode=$(stat -c %a "$BINDS" 2>/dev/null || echo 644)
     strip_binds
+    local tmp
+    tmp=$(mktemp "$BINDS.XXXXXX")
+    cat "$BINDS" > "$tmp"
     {
         printf '\n%s\n' "$MARK"
         printf '%s\n' "$COPY_BIND"
         printf '%s\n' "$SAVE_BIND"
-    } >> "$BINDS"
+    } >> "$tmp"
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$BINDS"
     echo "Added ALT + P and ALT + SHIFT + P to $BINDS."
 }
 
@@ -5594,10 +5825,8 @@ stage_vibrance() (
 # The value is applied now and again at login by a systemd user service,
 # because a driver reload or reboot resets the display attribute.
 #
-# Usage:
-#   sh installer stage            install if needed, apply, install the service
-#   sh installer stage --check    report only
-#   sh installer stage --revert   remove the service and reset vibrance to 0
+# install.sh applies this stage. The function also accepts --check and --revert
+# for targeted use.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -5611,6 +5840,7 @@ QML="$CONFIG/quickshell/pill/Singletons/Devices.qml"
 HELPER="$LOCAL_BIN/ricelin-nvibrant"
 UNIT_DIR="$CONFIG/systemd/user"
 UNIT="$UNIT_DIR/nvibrant-75.service"
+RESTART="$CONFIG/hypr/scripts/ricelin"
 VALUE=512
 PERCENT=75
 
@@ -5624,6 +5854,12 @@ esac
 
 install_package() {
     command -v nvibrant >/dev/null 2>&1 && return 0
+    if ! command -v yay >/dev/null 2>&1 && ! command -v paru >/dev/null 2>&1; then
+        ensure_aur_helper || {
+            echo "nvibrant is missing; install the AUR package nvibrant-bin." >&2
+            return 1
+        }
+    fi
     if command -v yay >/dev/null 2>&1; then
         yay -S --needed --noconfirm nvibrant-bin
     elif command -v paru >/dev/null 2>&1; then
@@ -5636,7 +5872,7 @@ install_package() {
 
 write_helper() {
     mkdir -p "$LOCAL_BIN"
-cat > "$HELPER" <<'SH'
+    write_atomic "$HELPER" 0755 <<'SH'
 #!/bin/sh
 # Apply the Ricelin digital-vibrance level to every connected NVIDIA output.
 set -eu
@@ -5665,12 +5901,11 @@ connected 'DP-2'     && dp2=$VALUE
 [ "$dvid$hdmi$dp1$dp2" = "0000" ] && exit 0
 exec nvibrant "$dvid" "$hdmi" "$dp1" "$dp2"
 SH
-    chmod 755 "$HELPER"
 }
 
 write_service() {
     mkdir -p "$UNIT_DIR"
-cat > "$UNIT" <<'UNIT'
+    write_atomic "$UNIT" 0644 <<UNIT
 [Unit]
 Description=Apply 75% NVIDIA digital vibrance
 After=graphical-session.target
@@ -5679,7 +5914,7 @@ PartOf=graphical-session.target
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 3
-ExecStart=%h/.local/bin/ricelin-nvibrant
+ExecStart="$HELPER"
 RemainAfterExit=yes
 
 [Install]
@@ -5734,22 +5969,26 @@ text = text.replace(old_code, new_code, 1)
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     fh.write(text)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 print("vibrance slider patched")
 PY
 }
 
 # The pill owns the displayed vibrance: it restores this file at startup. Write
-# 75 so the number in the mixer matches the value applied here. If the pill is
-# already running under its watchdog, restart it to pick the file up; without a
-# watchdog we leave it alone and the next login will show the new value.
+# 75 so the number in the mixer matches the value applied here. Restart the pill
+# through its own launcher; killing it directly depends on a watchdog that may
+# not be running.
 sync_pill() {
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$1" > "$STATE"
+    [ -x "$RESTART" ] || return 0
     command -v qs >/dev/null 2>&1 || return 0
     qs -c pill ipc show >/dev/null 2>&1 || return 0
-    pgrep -f "$HOME/.config/hypr/scripts/watchdog.sh pill" >/dev/null 2>&1 || return 0
-    qs -c pill kill >/dev/null 2>&1 || true
+    "$RESTART" restart pill >/dev/null 2>&1 || true
 }
 
 connector_status() {
@@ -5821,7 +6060,7 @@ sync_pill "$PERCENT"
 echo "Digital vibrance: ${PERCENT}% (raw $VALUE), pill slider and state synced, re-applied by nvibrant-75.service at login."
 )
 
-# ---------------------------------------------------------------- stage_ui_tweaks
+# ---------------------------------------------------------------- stage_logout
 stage_logout() (
 # Return to SDDM instead of leaving the display on a black tty.
 #
@@ -5850,7 +6089,7 @@ if [ "${1:-}" = "--root" ]; then
     user=$(target_user)
     install -d -m 755 /usr/local/lib/ricelin /etc/sudoers.d
 
-    cat > "$ROOT_HELPER" <<'HELPER'
+    write_atomic "$ROOT_HELPER" 0755 <<'HELPER'
 #!/bin/sh
 # Ricelin: after Hyprland exits, put the display back on SDDM's greeter VT.
 #
@@ -5873,7 +6112,6 @@ esac
 command -v systemd-run >/dev/null 2>&1 || exit 0
 exec systemd-run --collect --quiet --on-active=1 /usr/bin/chvt "$vt"
 HELPER
-    chmod 755 "$ROOT_HELPER"
 
     tmp=$(mktemp)
     cat > "$tmp" <<EOF
@@ -5890,7 +6128,7 @@ EOF
 fi
 
 mkdir -p "$(dirname "$USER_HELPER")"
-cat > "$USER_HELPER" <<'HELPER'
+write_atomic "$USER_HELPER" 0755 <<'HELPER'
 #!/bin/sh
 # Log out of Hyprland and hand the display back to SDDM.
 #
@@ -5907,7 +6145,6 @@ if command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1; then
 fi
 exec hyprctl dispatch 'hl.dsp.exit()'
 HELPER
-chmod 755 "$USER_HELPER"
 
 if [ ! -f "$POWER" ]; then
     echo "Power.qml not found at $POWER" >&2
@@ -5937,14 +6174,14 @@ if [ -x "$RESTART" ] && qs -c pill ipc show >/dev/null 2>&1; then
 fi
 )
 
+# ---------------------------------------------------------------- stage_ui_tweaks
 stage_ui_tweaks() (
-# Match the remaining desktop tweaks: 12 px cursor, SUPER+Q close,
-# SUPER+SHIFT+Q kill, and Thunar in double-click mode.
+# Match the remaining desktop tweaks: 12 px cursor and the SUPER+Q /
+# SUPER+SHIFT+Q window binds. Thunar's double-click mode is owned by the Thunar
+# integration stage.
 #
-# Usage:
-#   sh installer stage            apply
-#   sh installer stage --revert   restore 24 px cursor, SUPER+W / CTRL+SHIFT+W,
-#                                 and Thunar single-click
+# install.sh applies this stage. The --revert path restores the 24 px cursor
+# and SUPER+W / CTRL+SHIFT+W binds when called directly.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -5959,12 +6196,10 @@ CURSOR_THEME="Bibata-Modern-Ice"
 
 mode=${1:-apply}
 size=12
-single=false
 case "$mode" in
     --revert|-r|revert)
         mode=revert
         size=24
-        single=true
         ;;
     *) mode=apply ;;
 esac
@@ -5985,6 +6220,10 @@ def save(path, text):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 
 
@@ -6017,24 +6256,19 @@ if command -v gsettings >/dev/null 2>&1; then
     gsettings set org.gnome.desktop.interface cursor-size "$size" 2>/dev/null || true
 fi
 
-if command -v xfconf-query >/dev/null 2>&1; then
-    xfconf-query -c thunar -p /misc-single-click -s "$single" 2>/dev/null || true
-    command -v thunar >/dev/null 2>&1 && thunar -q >/dev/null 2>&1 || true
-fi
-
 if command -v hyprctl >/dev/null 2>&1; then
     hyprctl setcursor "$CURSOR_THEME" "$size" >/dev/null 2>&1 || true
     hyprctl reload >/dev/null 2>&1 || true
 fi
 
 if [ "$mode" = revert ]; then
-    echo "Reverted: cursor 24, SUPER+W close / CTRL+SHIFT+W kill, Thunar single-click."
+    echo "Reverted: cursor 24, SUPER+W close / CTRL+SHIFT+W kill."
 else
-    echo "Applied: cursor 12, SUPER+Q close / SUPER+SHIFT+Q kill, Thunar double-click."
+    echo "Applied: cursor 12, SUPER+Q close / SUPER+SHIFT+Q kill."
 fi
 )
 
-# ---------------------------------------------------------------- stage_portal_scheme
+# ---------------------------------------------------------------- stage_hyprtoolkit_palette
 stage_hyprtoolkit_palette() (
 # Make hyprpolkitagent's authentication popup follow the desktop palette.
 #
@@ -6135,6 +6369,10 @@ if 'if sys.argv[1] == "--hyprtoolkit":' not in text:
 tmp = p + ".tmp"
 with open(tmp, "w") as fh:
     fh.write(text)
+try:
+    os.chmod(tmp, os.stat(p).st_mode)
+except OSError:
+    pass
 os.replace(tmp, p)
 PY
 
@@ -6150,6 +6388,7 @@ fi
 echo "Polkit prompt: follows the wallpaper palette."
 )
 
+# ---------------------------------------------------------------- stage_wallpaper_dir
 stage_wallpaper_dir() (
 # Keep the wallpaper collection under ~/.config/ricelin, not ~/Ricelin.
 #
@@ -6190,12 +6429,23 @@ mv "$tmp" "$FLAGS"
 printf '%s\n' "$NEW" > "$DIRSTATE"
 
 python3 - "$OLD" "$NEW" "$STATEBASE" "$CACHEBASE" <<'PY'
+import os
 import sys
 from pathlib import Path
 
 old, new, statebase, cachebase = sys.argv[1:5]
 state = Path(statebase)
 cache = Path(cachebase)
+
+
+def save(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
 
 # Plain text state files.
 for path in (
@@ -6213,16 +6463,25 @@ for path in (
     if old in text:
         updated = text.replace(old, new)
         if updated != text:
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(updated)
-            tmp.replace(path)
+            save(path, updated)
 PY
 
 python3 - "$CONFIG" <<'PY'
+import os
 import sys
 from pathlib import Path
 
 config = Path(sys.argv[1])
+
+
+def save(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
 shell_old = '"$HOME/Ricelin/wallpapers"'
 shell_new = '"${XDG_CONFIG_HOME:-$HOME/.config}/ricelin/wallpapers"'
 qml_old = 'Quickshell.env("HOME") + "/Ricelin/wallpapers"'
@@ -6248,7 +6507,7 @@ for path in targets:
     updated = updated.replace(qml_old, qml_new)
     updated = updated.replace(comment_old, comment_new)
     if updated != text:
-        path.write_text(updated)
+        save(path, updated)
 PY
 
 # The upstream helper is not executable, so the Super+B binding cannot run it.
@@ -6265,6 +6524,7 @@ fi
 echo "Wallpapers: $NEW (helpers executable)."
 )
 
+# ---------------------------------------------------------------- stage_wallpapers
 stage_wallpapers() (
 # Ship the Ricelin wallpaper set and make 4.jpg the default.
 #
@@ -6375,6 +6635,7 @@ fi
 echo "Wallpapers: 1.png, 2.jpg, 3.png, 4.jpg; default 4.jpg; 4.jpg tone dark, others auto."
 )
 
+# ---------------------------------------------------------------- stage_personal_settings
 stage_personal_settings() (
 # Copy the live SUPER+I choices that differ from the shipped defaults.
 #
@@ -6870,6 +7131,10 @@ if src == original:
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     fh.write(src)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
 os.replace(tmp, path)
 print("wallcolors.py: Hermes renderer installed")
 PY
@@ -6918,12 +7183,2456 @@ for name in desktop.log desktop-chromium.log; do
     if [ -L "$path" ] && [ "$(readlink -f "$path")" = /dev/null ]; then
         continue
     fi
-    rm -f "$path"
-    ln -s /dev/null "$path"
+    # Keep one copy of the previous log instead of deleting diagnostics.
+    if [ -e "$path" ] && [ ! -L "$path" ]; then
+        mv -f "$path" "$path.pre-ricelin" || true
+    fi
+    ln -sfn /dev/null "$path"
 done
-echo "Hermes desktop logs: desktop.log + desktop-chromium.log -> /dev/null (restart Hermes to detach old handles)"
+echo "Hermes desktop logs: desktop.log + desktop-chromium.log -> /dev/null (previous logs kept as .pre-ricelin; restart Hermes to detach old handles)"
 )
 
+# ---------------------------------------------------------------- stage_agent_activity
+stage_agent_activity() (
+# One pill line for whichever coding agent is running.
+#
+# The pill already has a live line beside the clock, fed by
+# $XDG_RUNTIME_DIR/ricelin-agents/*.json. Only Claude Code wrote those files:
+# hypr/scripts/agent-state.sh is a Claude hook and finds its terminal by walking
+# the hook's own process ancestry. OpenCode's server has no terminal in its
+# ancestry, and Hermes' desktop backend runs under systemd, so neither could use
+# that hook.
+#
+# This stage adds two writers and gives the line a provider-neutral name:
+#
+#   ~/.config/opencode/plugins/ricelin-agent-state/index.ts
+#       Maps OpenCode session events to wait/done/clear, then calls
+#       agent-state-opencode.sh to resolve the window from the session folder.
+#       OpenCode discovers the plugin on its own, including in a running server.
+#
+#   ~/.hermes/plugins/ricelin-pill/
+#       A Hermes plugin (not a shell hook, which would need a per-command consent
+#       prompt) for on_human_input_request/resolved and on_session_end/finalize.
+#       It reads cwd/title from state.db and attributes CLI sessions through the
+#       process ancestry, desktop sessions through the Hermes window class.
+#
+#   hypr/scripts/watchdog.sh
+#       Creates the runtime folder and .bump before the pill starts. The pill
+#       only watches .bump if it exists at start-up, and the runtime folder is
+#       wiped at logout, so without this a cold boot would never watch it.
+#
+# The settings call the source "AI agent" and the module "Activity" instead of
+# naming Claude and borrowing Apple's "Live Activity" term.
+#
+# A direct --revert removes both integrations, the watchdog block and the renamed
+# labels, then restarts the pill. Applying twice is a no-op.
+
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+RUNTIME="${XDG_RUNTIME_DIR:-/tmp}"
+HELPER="$CONFIG/hypr/scripts/agent-state-opencode.sh"
+OC_PLUGIN="$CONFIG/opencode/plugins/ricelin-agent-state"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+export HERMES_HOME
+HERMES_PLUGIN="$HERMES_HOME/plugins/ricelin-pill"
+WATCHDOG="$CONFIG/hypr/scripts/watchdog.sh"
+QML="$CONFIG/quickshell/pill"
+RESTART="$CONFIG/hypr/scripts/ricelin"
+
+restart_pill() {
+    [ -x "$RESTART" ] || return 0
+    command -v qs >/dev/null 2>&1 || return 0
+    qs -c pill ipc show >/dev/null 2>&1 || return 0
+    "$RESTART" restart pill >/dev/null 2>&1 || true
+}
+
+case "${1:-apply}" in
+    --revert|-r|revert) MODE=revert ;;
+    *)                  MODE=apply ;;
+esac
+
+if [ "$MODE" = revert ]; then
+    rm -rf "$OC_PLUGIN"
+    rm -f "$HELPER" "$HELPER.tmp"
+
+    HERMES="$(command -v hermes 2>/dev/null || true)"
+    if [ -z "$HERMES" ] && [ -x "$HOME/.local/bin/hermes" ]; then
+        HERMES="$HOME/.local/bin/hermes"
+    fi
+    if [ -n "$HERMES" ]; then
+        "$HERMES" plugins disable ricelin-pill >/dev/null 2>&1 || true
+    fi
+    rm -rf "$HERMES_PLUGIN"
+
+    if [ -f "$WATCHDOG" ]; then
+        python3 - "$WATCHDOG" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+blocks = [
+    ('    # ricelin-agent-activity: the pill watches this file only if it exists\n'
+     '    # when it loads, and the runtime folder is wiped on logout.\n'
+     '    mkdir -p "$run/ricelin-agents"\n'
+     '    chmod 0700 "$run/ricelin-agents" 2>/dev/null || true\n'
+     '    touch "$run/ricelin-agents/.bump"\n'),
+    ('    # ricelin-agent-activity: the pill watches this file only if it exists\n'
+     '    # when it loads, and the runtime folder is wiped on logout.\n'
+     '    mkdir -p "$run/ricelin-agents"\n'
+     '    touch "$run/ricelin-agents/.bump"\n'),
+]
+for block in blocks:
+    if block in text:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(block, "", 1))
+        try:
+            os.chmod(tmp, os.stat(path).st_mode)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        break
+PY
+    fi
+else
+    mkdir -p "$(dirname "$HELPER")" "$OC_PLUGIN" "$HERMES_PLUGIN"
+
+    cat > "$HELPER.tmp" <<'HELPER_EOF'
+#!/bin/sh
+# OpenCode -> the pill's agent activity.
+#
+# The Claude hook (agent-state.sh) finds the window by walking up its own
+# process ancestry, which works because Claude runs inside the terminal.
+# OpenCode does not: its server is a systemd user service with no terminal in
+# its ancestry. So this finds the window from the session's directory instead.
+#
+# stdin is one JSON object: {"session_id","cwd","title","status","message"}
+# status is wait | done | clear | end, matching agent-state.sh.
+set -eu
+[ -n "${XDG_RUNTIME_DIR:-}" ] || exit 0
+umask 077
+
+dir="$XDG_RUNTIME_DIR/ricelin-agents"
+in=$(cat)
+sid=$(printf '%s' "$in" | jq -r '.session_id // empty')
+# A session id becomes a filename; keep it to a safe charset.
+sid=$(printf '%s' "$sid" | sed 's/[^A-Za-z0-9._-]/_/g')
+[ -n "$sid" ] || exit 0
+status=$(printf '%s' "$in" | jq -r '.status // empty')
+cwd=$(printf '%s' "$in" | jq -r '.cwd // empty')
+msg=$(printf '%s' "$in" | jq -r '.message // empty')
+# One glance, not a paragraph: the session title, collapsed and cut at a word
+# boundary. Used only when the session runs outside a project folder.
+title=$(printf '%s' "$in" | jq -r '
+    def short:
+        gsub("\\s+"; " ")
+        | split(" — ")[0] | split(" – ")[0] | split(" - ")[0] | split(": ")[0]
+        | if length > 28
+          then ((.[0:28] | sub("\\s+\\S*$"; "") | sub("[ ,.;:-]+$"; "")) + "…")
+          else . end;
+    .title // "" | short' 2>/dev/null || true)
+f="$dir/$sid.json"
+
+bump() { date +%s%N > "$dir/.bump"; }
+
+case "$status" in
+    clear)
+        jq -e '.status == "wait"' "$f" >/dev/null 2>&1 || exit 0
+        rm -f "$f"
+        bump
+        exit 0
+        ;;
+    reset|end)
+        [ -f "$f" ] || exit 0
+        rm -f "$f"
+        bump
+        exit 0
+        ;;
+    wait|done) ;;
+    *) exit 0 ;;
+esac
+
+clients=$(hyprctl clients -j 2>/dev/null | jq -r '.[] | "\(.pid) \(.address) \(.class)"' || true)
+
+# First ancestor of a pid that is a Hyprland client (its .pid is the client pid).
+client_of() {
+    pp=$1
+    while [ "${pp:-0}" -gt 1 ]; do
+        a=$(printf '%s\n' "$clients" | awk -v p="$pp" '$1 == p { print $2; exit }')
+        [ -n "$a" ] && { printf '%s' "$a"; return 0; }
+        pp=$(sed 's/^.*) //' "/proc/$pp/stat" 2>/dev/null | awk '{ print $2 }' || true)
+        [ -n "$pp" ] || break
+    done
+    return 1
+}
+
+addr=""
+if [ -n "$cwd" ]; then
+    for p in $(pgrep -x opencode 2>/dev/null || true); do
+        [ "$(readlink "/proc/$p/cwd" 2>/dev/null || true)" = "$cwd" ] || continue
+        addr=$(client_of "$p") && break
+    done
+fi
+# A TUI started outside the session folder has a different cwd. Fall back to the
+# OpenCode terminal itself, preferring the focused one when several are open.
+if [ -z "$addr" ]; then
+    candidates=$(for p in $(pgrep -x opencode 2>/dev/null || true); do
+        a=$(client_of "$p" || true)
+        [ -n "$a" ] && printf '%s\n' "$a"
+    done | sort -u)
+    if [ -n "$candidates" ]; then
+        active=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' || true)
+        addr=$(printf '%s\n' "$candidates" | grep -Fx "$active" | head -n 1 || true)
+        [ -n "$addr" ] || addr=$(printf '%s\n' "$candidates" | head -n 1)
+    fi
+fi
+# The desktop app has no terminal; use its own window when one is open.
+if [ -z "$addr" ]; then
+    addr=$(printf '%s\n' "$clients" | awk 'tolower($3) ~ /opencode/ { print $2; exit }')
+fi
+
+proj="$cwd"
+[ -n "$proj" ] && proj=$(git -C "$proj" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$proj")
+
+# The project folder names the session; $HOME carries no information, so fall
+# back to the title there (the desktop app starts every turn in the home dir).
+label=""
+case "$proj" in
+    ""|"$HOME"|"$HOME/") ;;
+    *) label=${proj##*/} ;;
+esac
+[ -n "$label" ] || label=$title
+[ -n "$label" ] || label=AI
+
+mkdir -p "$dir"
+chmod 0700 "$dir" 2>/dev/null || true
+jq -nc --arg s "$status" --arg c "$proj" --arg l "$label" --arg m "$msg" --arg w "$addr" --argjson t "$(date +%s)" \
+    '{status: $s, cwd: $c, label: $l, message: $m, window: $w, at: $t}' > "$f.tmp" && mv "$f.tmp" "$f"
+bump
+HELPER_EOF
+    chmod 0755 "$HELPER.tmp"
+    mv "$HELPER.tmp" "$HELPER"
+
+    cat > "$OC_PLUGIN/index.ts.tmp" <<'OC_PLUGIN_EOF'
+import { Plugin } from "@opencode/plugin"
+import { spawn } from "node:child_process"
+
+/**
+ * Ricelin agent activity.
+ *
+ * Turns OpenCode session events into the `wait` / `done` state the pill's agent
+ * line reads, by calling agent-state-opencode.sh, which resolves the window
+ * from the session directory.
+ */
+
+const HOME = process.env.HOME ?? ""
+const SCRIPT = `${HOME}/.config/hypr/scripts/agent-state-opencode.sh`
+
+/** Which events matter, and what each means to the pill. */
+const TYPES = [
+    "permission.asked",
+    "permission.replied",
+    "form.created",
+    "form.replied",
+    "form.cancelled",
+    "session.created",
+    "session.deleted",
+    "session.archived",
+    "session.execution.started",
+    "session.execution.succeeded",
+    "session.execution.failed",
+    "session.execution.interrupted",
+] as const
+
+type Status = "wait" | "done" | "clear" | "end"
+
+function classify(type: string, data: any): { status: Status; message?: string } | null {
+    switch (type) {
+        case "permission.asked":
+            return { status: "wait", message: data?.message || data?.action || "Permission" }
+        case "form.created":
+            return { status: "wait", message: data?.form?.title || "Input needed" }
+        case "permission.replied":
+        case "form.replied":
+        case "form.cancelled":
+        case "session.execution.started":
+        case "session.execution.interrupted":
+        case "session.created":
+            return { status: "clear" }
+        case "session.execution.succeeded":
+        case "session.execution.failed":
+            return { status: "done" }
+        case "session.deleted":
+        case "session.archived":
+            return { status: "end" }
+    }
+    return null
+}
+
+function sessionOf(data: any): string {
+    return data?.sessionID
+        ?? data?.session?.id
+        ?? data?.request?.sessionID
+        ?? data?.permission?.sessionID
+        ?? data?.form?.sessionID
+        ?? data?.info?.sessionID
+        ?? ""
+}
+
+export default Plugin.define({
+    id: "ricelin.agent-state",
+    async setup(ctx: any) {
+        const dirs = new Map<string, { dir: string; title: string }>()
+
+        const report = (payload: Record<string, string>) =>
+            new Promise<void>((resolve) => {
+                try {
+                    const p = spawn("/bin/sh", [SCRIPT])
+                    p.on("error", () => resolve())
+                    p.on("close", () => resolve())
+                    p.stdin.on("error", () => resolve())
+                    p.stdin.end(JSON.stringify(payload))
+                } catch {
+                    resolve()
+                }
+            })
+
+        /** Where the session runs and what it is called; both are cached per id. */
+        const sessionInfo = async (sessionID: string): Promise<{ dir: string; title: string }> => {
+            const cached = dirs.get(sessionID)
+            if (cached !== undefined) return cached
+            let dir = ""
+            let title = ""
+            try {
+                const s: any = await ctx.session.get({ sessionID })
+                dir = s?.location?.directory ?? s?.directory ?? s?.cwd ?? ""
+                title = s?.title ?? s?.info?.title ?? s?.name ?? ""
+            } catch {}
+            const info = { dir, title }
+            dirs.set(sessionID, info)
+            return info
+        }
+
+        const controller = new AbortController()
+        void (async () => {
+            try {
+                for await (const event of ctx.event.subscribe({ signal: controller.signal, types: TYPES })) {
+                    const data = (event as any).data
+                    const cls = classify((event as any).type, data)
+                    if (!cls) continue
+                    const sessionID = sessionOf(data)
+                    if (!sessionID) continue
+                    if (cls.status === "end") dirs.delete(sessionID)
+                    const info = cls.status === "wait" || cls.status === "done"
+                        ? await sessionInfo(sessionID)
+                        : { dir: "", title: "" }
+                    await report({ session_id: sessionID, cwd: info.dir, title: info.title, status: cls.status, message: cls.message ?? "" })
+                }
+            } catch {}
+        })()
+
+        return () => controller.abort()
+    },
+})
+OC_PLUGIN_EOF
+    mv "$OC_PLUGIN/index.ts.tmp" "$OC_PLUGIN/index.ts"
+
+    cat > "$HERMES_PLUGIN/plugin.yaml.tmp" <<'HERMES_MANIFEST_EOF'
+name: ricelin-pill
+version: "1.0.0"
+description: "Show Hermes turns and human-input prompts on the Ricelin pill."
+provides_hooks:
+  - on_human_input_request
+  - on_human_input_resolved
+  - on_session_end
+  - on_session_finalize
+HERMES_MANIFEST_EOF
+    mv "$HERMES_PLUGIN/plugin.yaml.tmp" "$HERMES_PLUGIN/plugin.yaml"
+
+    cat > "$HERMES_PLUGIN/__init__.py.tmp" <<'HERMES_PLUGIN_EOF'
+"""Ricelin pill activity for Hermes.
+
+The pill reads $XDG_RUNTIME_DIR/ricelin-agents/*.json. Claude Code and OpenCode
+have their own writers; this plugin is the Hermes one.
+
+A shell hook would need a first-use consent prompt per event/command pair, and
+the desktop app skips unapproved ones silently, so this is a normal plugin.
+Four observer hooks are enough:
+
+    on_human_input_request   -> wait
+    on_human_input_resolved  -> clear the wait
+    on_session_end           -> done, once per turn
+    on_session_finalize      -> clear a leftover wait; a done note expires itself
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import sqlite3
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+_HOME = Path.home()
+_DESKTOP_PLATFORMS = {"local", "desktop", "gui"}
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or (_HOME / ".hermes"))
+
+
+def _runtime_dir() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "ricelin-agents"
+
+
+def _state_path(session_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+    return _runtime_dir() / (safe + ".json")
+
+
+def _bump(directory: Path) -> None:
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+        (directory / ".bump").write_text(str(time.time_ns()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _hypr_json(arguments: list[str]) -> Any:
+    try:
+        result = subprocess.run(
+            ["hyprctl", *arguments],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        return json.loads(result.stdout or "null")
+    except Exception:
+        return None
+
+
+def _ancestor_window(clients: Any) -> str:
+    """The first Hyprland client that owns one of this process's ancestors."""
+    by_pid: dict[int, str] = {}
+    for client in clients or []:
+        try:
+            by_pid[int(client.get("pid"))] = str(client.get("address") or "")
+        except (TypeError, ValueError):
+            continue
+
+    pid = os.getpid()
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        address = by_pid.get(pid)
+        if address:
+            return address
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return ""
+
+
+def _desktop_window(clients: Any) -> str:
+    """The Hermes desktop window, for sessions whose backend runs under systemd."""
+    for client in clients or []:
+        blob = " ".join(
+            str(client.get(key) or "")
+            for key in ("class", "initialClass")
+        ).lower()
+        if "hermes" in blob:
+            return str(client.get("address") or "")
+    return ""
+
+
+def _session_info(session_id: str) -> tuple[str, str]:
+    """Read cwd and title from Hermes' state.db without taking a write lock."""
+    if not session_id:
+        return "", ""
+    database = _hermes_home() / "state.db"
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=0.2)
+        try:
+            row = connection.execute(
+                "SELECT cwd, title FROM sessions WHERE id = ? LIMIT 1", (session_id,)
+            ).fetchone()
+        finally:
+            connection.close()
+        return ((row[0] or "", row[1] or "") if row else ("", ""))
+    except Exception:
+        return "", ""
+
+
+def _short_title(title: str) -> str:
+    text = re.sub(r"\s+", " ", title or "").strip()
+    for separator in (" — ", " – ", " - ", ": "):
+        if separator in text:
+            text = text.split(separator, 1)[0].strip()
+    if len(text) > 28:
+        text = text[:28].rstrip()
+        text = re.sub(r"\s+\S*$", "", text)
+        text = text.rstrip(" ,.;:-") + "…"
+    return text
+
+
+def _label(cwd: str, title: str) -> str:
+    project = (cwd or "").strip().rstrip("/")
+    home = str(_HOME).rstrip("/")
+    if project and project != home:
+        return Path(project).name or _short_title(title) or "AI"
+    return _short_title(title) or "AI"
+
+
+def _write(
+    status: str,
+    session_id: str,
+    *,
+    message: str = "",
+    platform: str = "",
+) -> None:
+    if not session_id:
+        return
+    directory = _runtime_dir()
+    path = _state_path(session_id)
+
+    if status in {"clear", "end"}:
+        try:
+            if status == "clear":
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if data.get("status") != "wait":
+                    return
+            path.unlink()
+        except (OSError, ValueError):
+            return
+        _bump(directory)
+        return
+
+    cwd, title = _session_info(session_id)
+    clients = _hypr_json(["clients", "-j"])
+    window = _ancestor_window(clients)
+    if not window and platform.lower() in _DESKTOP_PLATFORMS:
+        window = _desktop_window(clients)
+
+    # If the window is already focused, the prompt or result is in front of you.
+    if status in {"wait", "done"} and window:
+        active = _hypr_json(["activewindow", "-j"]) or {}
+        if str(active.get("address") or "") == window:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            _bump(directory)
+            return
+
+    payload = {
+        "status": status,
+        "cwd": cwd,
+        "label": _label(cwd, title),
+        "message": re.sub(r"\s+", " ", message or "").strip()[:120],
+        "window": window,
+        "at": int(time.time()),
+    }
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except OSError:
+        return
+    _bump(directory)
+
+
+def _guard(callback: Callable[..., None]) -> Callable[..., None]:
+    def wrapped(**kwargs: Any) -> None:
+        try:
+            callback(**kwargs)
+        except Exception:
+            logger.debug("ricelin-pill hook failed", exc_info=True)
+
+    return wrapped
+
+
+@_guard
+def _on_human_input_request(**kwargs: Any) -> None:
+    message = str(kwargs.get("prompt") or kwargs.get("kind") or "")
+    _write(
+        "wait",
+        str(kwargs.get("session_id") or ""),
+        message=message,
+        platform=str(kwargs.get("platform") or ""),
+    )
+
+
+@_guard
+def _on_human_input_resolved(**kwargs: Any) -> None:
+    _write("clear", str(kwargs.get("session_id") or ""))
+
+
+@_guard
+def _on_session_end(**kwargs: Any) -> None:
+    _write("done", str(kwargs.get("session_id") or ""), platform=str(kwargs.get("platform") or ""))
+
+
+@_guard
+def _on_session_finalize(**kwargs: Any) -> None:
+    _write("clear", str(kwargs.get("session_id") or ""))
+
+
+def register(ctx: Any) -> None:
+    ctx.register_hook("on_human_input_request", _on_human_input_request)
+    ctx.register_hook("on_human_input_resolved", _on_human_input_resolved)
+    ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("on_session_finalize", _on_session_finalize)
+HERMES_PLUGIN_EOF
+    mv "$HERMES_PLUGIN/__init__.py.tmp" "$HERMES_PLUGIN/__init__.py"
+
+    HERMES="$(command -v hermes 2>/dev/null || true)"
+    if [ -z "$HERMES" ] && [ -x "$HOME/.local/bin/hermes" ]; then
+        HERMES="$HOME/.local/bin/hermes"
+    fi
+    if [ -n "$HERMES" ]; then
+        "$HERMES" plugins enable ricelin-pill >/dev/null 2>&1 \
+            || echo "Hermes: could not enable the ricelin-pill plugin; run 'hermes plugins enable ricelin-pill'" >&2
+    else
+        echo "Hermes is not installed yet; the pill plugin will wait under $HERMES_PLUGIN" >&2
+    fi
+fi
+
+# The pill only watches its state file if the file exists when the shell loads,
+# and the runtime folder is wiped on logout, so a cold boot never watches it.
+if [ "$MODE" = apply ] && [ -f "$WATCHDOG" ]; then
+    python3 - "$WATCHDOG" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+needle = 'while :; do\n    qs -c "$name"'
+insert = ('while :; do\n'
+          '    # ricelin-agent-activity: the pill watches this file only if it exists\n'
+          '    # when it loads, and the runtime folder is wiped on logout.\n'
+          '    mkdir -p "$run/ricelin-agents"\n'
+          '    chmod 0700 "$run/ricelin-agents" 2>/dev/null || true\n'
+          '    touch "$run/ricelin-agents/.bump"\n'
+          '    qs -c "$name"')
+legacy = ('while :; do\n'
+          '    # ricelin-agent-activity: the pill watches this file only if it exists\n'
+          '    # when it loads, and the runtime folder is wiped on logout.\n'
+          '    mkdir -p "$run/ricelin-agents"\n'
+          '    touch "$run/ricelin-agents/.bump"\n'
+          '    qs -c "$name"')
+if insert in text:
+    sys.exit(0)
+if legacy in text:
+    text = text.replace(legacy, insert, 1)
+elif needle not in text:
+    sys.stderr.write("watchdog.sh: anchor not found, skipped\n")
+    sys.exit(0)
+else:
+    text = text.replace(needle, insert, 1)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write(text)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
+os.replace(tmp, path)
+PY
+fi
+
+mkdir -p "$RUNTIME/ricelin-agents"
+chmod 0700 "$RUNTIME/ricelin-agents" 2>/dev/null || true
+touch "$RUNTIME/ricelin-agents/.bump"
+
+# Give the line a provider-neutral name. "Live activity" is Apple's term and
+# "Claude agent" stopped describing the writers once OpenCode and Hermes arrived.
+python3 - "$QML" "$MODE" <<'PY'
+import os
+import sys
+
+root, mode = sys.argv[1], sys.argv[2]
+pairs = [
+    ("App/PagePill.qml",
+     'tabs: ["Layout", "Behaviour", "Shape", "Live activity"]',
+     'tabs: ["Layout", "Behaviour", "Shape", "Activity"]'),
+    ("App/PagePill.qml",
+     '        tab: "Live activity"',
+     '        tab: "Activity"'),
+    ("App/PillDefaults.js",
+     '    { id: "live", label: "Live activity", icon: "check", note: "Whatever is running right now" }',
+     '    { id: "live", label: "Activity", icon: "check", note: "Whatever is running right now" }'),
+    ("App/PillDefaults.js",
+     '    { id: "agent", label: "Claude agent", icon: "check", sub: "While an agent works or waits for you" }',
+     '    { id: "agent", label: "AI agent", icon: "check", sub: "While an agent works or waits for you" }'),
+    ("App/searchPill.js",
+     '{ page: "pill", tab: "Live activity", group: "Sources", label: "Live activity sources", sub: "Claude agent, timer, recording, new message, music", keywords: "priority order live activity claude agent timer countdown recording message notification music song", key: "pill.live", advanced: false }',
+     '{ page: "pill", tab: "Activity", group: "Sources", label: "Activity sources", sub: "AI agent, timer, recording, new message, music", keywords: "priority order activity ai agent hermes opencode claude timer countdown recording message notification music song", key: "pill.live", advanced: false }'),
+    ("App/searchPill.js",
+     'keywords: "rest resting order reorder drag divider separator glyph clock date workspaces weather battery music bars live activity tray wifi bluetooth add remove hide"',
+     'keywords: "rest resting order reorder drag divider separator glyph clock date workspaces weather battery music bars activity tray wifi bluetooth add remove hide"'),
+    ("App/searchIndex.js",
+     'keywords: "bar panel top modules idle hover live activity shape height rounding"',
+     'keywords: "bar panel top modules idle hover activity shape height rounding"'),
+    ("Singletons/Flags.qml",
+     '            /** Live activity sources switched off by default so only the agent and timer show, as before. */',
+     '            /** Activity sources switched off by default so only the agent and timer show, as before. */'),
+    ("Singletons/Agents.qml",
+     ' * Coding agent sessions that wait for Erik or just finished, written by hypr/scripts/agent-state.sh.',
+     ' * Coding agent sessions that wait for Erik or just finished, written by the Claude, OpenCode and Hermes integrations.'),
+    ("Singletons/Agents.qml",
+     '''    function project(a) {
+        const c = a && a.cwd ? String(a.cwd) : "";
+        return c.length > 0 ? c.substring(c.lastIndexOf("/") + 1) : "Claude";
+    }''',
+     '''    function project(a) {
+        if (a && typeof a.label === "string" && a.label.length > 0)
+            return a.label;
+        const c = a && a.cwd ? String(a.cwd) : "";
+        return c.length > 0 ? c.substring(c.lastIndexOf("/") + 1) : "AI";
+    }'''),
+]
+
+for relative, old, new in pairs:
+    path = os.path.join(root, relative)
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        print("warning: %s is missing; skipped" % path, file=sys.stderr)
+        continue
+    before, after = (old, new) if mode == "apply" else (new, old)
+    if before not in text:
+        if after in text:
+            continue
+        print("warning: %s: rename anchor not found; skipped" % path, file=sys.stderr)
+        continue
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(before, after, 1))
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+PY
+
+restart_pill
+if [ "$MODE" = apply ]; then
+    echo "AI agent activity: OpenCode + Hermes writers, Activity source labels"
+else
+    echo "AI agent activity: OpenCode/Hermes writers and renamed labels removed"
+fi
+)
+
+# ---------------------------------------------------------------- stage_spaces_no_discord
+stage_spaces_no_discord() (
+# Remove Ricelin's built-in Discord special workspace.
+#
+# The upstream spaces.lua ships a single entry, { id = "discord", ... }, which
+# routes Discord/Vesktop windows into special:discord and binds SUPER+A. This
+# desktop does not use it. The Settings page rewrites the file, so this removes
+# only an entry whose id is "discord" and leaves any other user-defined space
+# untouched.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+SPACES="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/modules/spaces.lua"
+[ -f "$SPACES" ] || { echo "spaces.lua not found at $SPACES" >&2; exit 1; }
+
+python3 - "$SPACES" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+lines = text.splitlines(keepends=True)
+out = []
+removed = 0
+for line in lines:
+    if re.search(r"""\bid\s*=\s*['"]discord['"]""", line):
+        removed += 1
+        continue
+    out.append(line)
+
+if not removed:
+    print("spaces.lua: no Discord special workspace to remove")
+    sys.exit(0)
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write("".join(out))
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
+os.replace(tmp, path)
+print("spaces.lua: removed the Discord special workspace")
+PY
+
+if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl reload >/dev/null 2>&1 || true
+fi
+)
+
+# ---------------------------------------------------------------- stage_fish_config
+stage_fish_config() (
+# Make the fish config safe on a machine without CachyOS, and put ~/.local/bin
+# on PATH.
+#
+# Ricelin's fish config sources
+# /usr/share/cachyos-fish-config/cachyos-config.fish, which exists only on
+# CachyOS. On Arch and EndeavourOS fish prints an error on every start. The
+# CachyOS file also owns PATH, so ~/.local/bin (where this installer puts
+# hyprshot) is not found. Remove the source line and add the path once;
+# fish_add_path itself is idempotent.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+FISH="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+mkdir -p "$(dirname "$FISH")"
+
+if [ ! -f "$FISH" ]; then
+    write_atomic "$FISH" 0644 <<'FISH'
+fish_add_path "$HOME/.local/bin"
+FISH
+    echo "fish: created $FISH with ~/.local/bin on PATH"
+    exit 0
+fi
+
+python3 - "$FISH" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+original = text
+
+lines = []
+for line in text.splitlines(keepends=True):
+    if re.match(r"\s*source\s+/usr/share/cachyos-fish-config/cachyos-config\.fish\s*$", line):
+        continue
+    lines.append(line)
+text = "".join(lines)
+
+# Do not leave the blank line the removed source left at the top.
+text = re.sub(r"\A[ \t]*\n+", "", text)
+
+if 'fish_add_path "$HOME/.local/bin"' not in text:
+    if text and not text.endswith("\n"):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += 'fish_add_path "$HOME/.local/bin"\n'
+elif not text.endswith("\n"):
+    text += "\n"
+
+if text != original:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    print("fish: removed the CachyOS source and kept ~/.local/bin on PATH")
+else:
+    print("fish: already correct")
+PY
+)
+
+# ---------------------------------------------------------------- stage_remove_rishot
+stage_remove_rishot() (
+# Remove rishot completely.
+#
+# rishot was installed from its own checkout into ~/.local/share/rishot and was
+# bound to Print / Shift+Print. This desktop uses hyprshot (installed by the
+# screenshot stage) instead. Remove the checkout, config, launcher, desktop
+# entry, its binds and the require() that loads them. A distro/AUR package is
+# removed in the root branch.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ "${1:-}" = "--root" ]; then
+    mapfile -t pkgs < <(pacman -Qq 2>/dev/null | grep -iE '^rishot($|-git$)' || true)
+    if [ "${#pkgs[@]}" -gt 0 ]; then
+        pacman -Rns --noconfirm "${pkgs[@]}" || true
+    fi
+    exit 0
+fi
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+HYPR="$CONFIG/hypr"
+
+rm -rf "$HOME/.local/share/rishot" "$CONFIG/rishot"
+rm -rf "$HOME/.cache/rishot" "$HOME/.local/state/rishot"
+rm -f "$HOME/.local/bin/rishot" "$HOME/.local/share/applications/rishot.desktop"
+rm -f "$HYPR/rishot.lua"
+
+MAIN="$HYPR/hyprland.lua"
+if [ -f "$MAIN" ] && grep -q 'rishot' "$MAIN"; then
+    python3 - "$MAIN" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+updated = re.sub(r'(?m)^[ \t]*require\(["\']rishot["\']\)[ \t]*\n', "", text)
+if updated != text:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(updated)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    print("hyprland.lua: removed require(\"rishot\")")
+PY
+fi
+
+for file in "$HYPR/modules/"*.lua "$HYPR/local.lua"; do
+    [ -f "$file" ] || continue
+    grep -q 'rishot' "$file" 2>/dev/null || continue
+    python3 - "$file" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+out = [line for line in lines if "rishot" not in line]
+if len(out) != len(lines):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("".join(out))
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    print(f"{path}: removed the rishot bind")
+PY
+done
+
+if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl reload >/dev/null 2>&1 || true
+fi
+
+echo "rishot: removed files, binds and the hyprland require"
+)
+
+# ---------------------------------------------------------------- stage_thunar_terminal_action
+stage_thunar_terminal_action() (
+# Add "Open Terminal Here" to Thunar's context menu, opening ghostty in the
+# selected folder.
+#
+# Thunar stores custom actions in ~/.config/Thunar/uca.xml. The existing action
+# used exo-open's TerminalEmulator, which resolves to whatever terminal is
+# configured (and is not installed here). Replace its command in place and keep
+# every other action.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+UCA="${XDG_CONFIG_HOME:-$HOME/.config}/Thunar/uca.xml"
+mkdir -p "$(dirname "$UCA")"
+
+python3 - "$UCA" <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+path = sys.argv[1]
+NAME = "Open Terminal Here"
+COMMAND = 'ghostty --working-directory="%f"'
+DESCRIPTION = "Open ghostty in this folder"
+
+try:
+    tree = ET.parse(path)
+    root = tree.getroot()
+except (OSError, ET.ParseError):
+    root = ET.Element("actions")
+    tree = ET.ElementTree(root)
+
+if root.tag != "actions":
+    sys.exit(f"{path}: unexpected root <{root.tag}>; refusing to rewrite")
+
+changed = False
+found = False
+for action in root.findall("action"):
+    if (action.findtext("name") or "").strip() != NAME:
+        continue
+    found = True
+    command = action.find("command")
+    if command is None:
+        command = ET.SubElement(action, "command")
+    if (command.text or "") != COMMAND:
+        command.text = COMMAND
+        changed = True
+    description = action.find("description")
+    if description is None:
+        description = ET.SubElement(action, "description")
+    if (description.text or "") != DESCRIPTION:
+        description.text = DESCRIPTION
+        changed = True
+    icon = action.find("icon")
+    if icon is None:
+        icon = ET.SubElement(action, "icon")
+    if (icon.text or "") != "utilities-terminal":
+        icon.text = "utilities-terminal"
+        changed = True
+    if action.find("directories") is None:
+        ET.SubElement(action, "directories")
+        changed = True
+
+if not found:
+    action = ET.SubElement(root, "action")
+    ET.SubElement(action, "icon").text = "utilities-terminal"
+    ET.SubElement(action, "name").text = NAME
+    ET.SubElement(action, "submenu").text = ""
+    ET.SubElement(action, "unique-id").text = "ricelin-open-terminal-here"
+    ET.SubElement(action, "command").text = COMMAND
+    ET.SubElement(action, "description").text = DESCRIPTION
+    ET.SubElement(action, "range").text = ""
+    ET.SubElement(action, "patterns").text = "*"
+    ET.SubElement(action, "startup-notify")
+    ET.SubElement(action, "directories")
+    changed = True
+
+if changed:
+    ET.indent(tree, space="\t")
+    tmp = path + ".tmp"
+    tree.write(tmp, encoding="UTF-8", xml_declaration=True)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    print("Thunar: Open Terminal Here now opens ghostty")
+else:
+    print("Thunar: Open Terminal Here already opens ghostty")
+PY
+)
+
+# ---------------------------------------------------------------- stage_model_route
+stage_model_route() (
+# Keep DeepSeek V4.1 Flash on the free OpenCode model whenever possible, and
+# hard-block paid OpenCode Go during peak pricing.
+#
+# DeepSeek bills the V4 models at twice the off-peak rate from 01:00-04:00 and
+# 06:00-10:00 UTC, Monday to Friday; OpenCode Go resells the same models at the
+# same rates. OpenCode's free DeepSeek model is preferred:
+#
+#   free available              -> free
+#   free exhausted, off-peak    -> Go
+#   free exhausted, peak        -> free is attempted; paid Go is blocked
+#
+# Three pieces share one schedule module (peakguard.py):
+#
+#   ~/.local/bin/peak-guard
+#       status / status --json / check / allow / deny / record. `allow 30m` is
+#       the deliberate door for a long refactor or a cron job that must spend
+#       peak rates.
+#   ~/.hermes/plugins/peak-guard/
+#       pre_llm_call returns {"action": "block"} before any inference request
+#       when paid Go is selected during peak or the free quota is exhausted.
+#       api_request_error records a free-quota failure so the router can switch.
+#   ~/.config/opencode/plugins/peak-guard/
+#       prompt blocks an exhausted-free peak turn before admission, and a
+#       model.request hook scoped to opencode-go blocks paid Go during peak.
+#   ~/.local/bin/ricelin-model-route
+#       rewrites the OpenCode/Hermes model choice at the peak boundaries and
+#       after a free-quota failure, updates OpenCode sessions and reloads it.
+#
+# Everything is idempotent. A direct --revert stops the timer, removes the
+# helper/plugins and restores the config files captured on first apply.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+LOCAL_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+STATE_BASE="${XDG_STATE_HOME:-$HOME/.local/state}"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+ROUTER="$LOCAL_BIN/ricelin-model-route"
+GUARD="$LOCAL_BIN/peak-guard"
+MODULE="$HOME/.local/lib/peakguard.py"
+GUARD_CONF="$CONFIG/ricelin/peakguard.conf"
+UNIT_DIR="$CONFIG/systemd/user"
+STATE="$STATE_BASE/ricelin/model-route"
+BACKUP="$STATE/backup"
+OC_CONFIG="$CONFIG/opencode/opencode.json"
+OC_PLUGIN="$CONFIG/opencode/plugins/peak-guard"
+HERMES_CONFIG="$HERMES_HOME/config.yaml"
+HERMES_PLUGIN="$HERMES_HOME/plugins/peak-guard"
+OLD_HERMES_PLUGIN="$HERMES_HOME/plugins/ricelin-model-route"
+
+hermes_bin() {
+    local bin
+    bin=$(command -v hermes 2>/dev/null || true)
+    if [ -z "$bin" ] && [ -x "$HOME/.local/bin/hermes" ]; then
+        bin="$HOME/.local/bin/hermes"
+    fi
+    printf '%s\n' "$bin"
+}
+
+reload_gateway() {
+    [ -S "$HERMES_HOME/gateway.sock" ] || return 0
+    python3 - "$HERMES_HOME" <<'PY' >/dev/null 2>&1 || true
+import json
+import socket
+import sys
+
+home = sys.argv[1]
+request = {"protocol": 1, "verb": "reload-plugins", "id": 1, "params": {"home": home}}
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(15)
+client.connect(home + "/gateway.sock")
+client.sendall((json.dumps(request) + "\n").encode())
+client.recv(65536)
+PY
+}
+
+case "${1:-apply}" in
+    --revert|-r|revert) MODE=revert ;;
+    *)                  MODE=apply ;;
+esac
+
+if [ "$MODE" = revert ]; then
+    systemctl --user disable --now ricelin-model-route.timer >/dev/null 2>&1 || true
+    systemctl --user stop ricelin-model-route.service >/dev/null 2>&1 || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+    hermes=$(hermes_bin)
+    if [ -n "$hermes" ]; then
+        "$hermes" plugins disable peak-guard >/dev/null 2>&1 || true
+        "$hermes" plugins disable ricelin-model-route >/dev/null 2>&1 || true
+    fi
+
+    rm -f "$ROUTER" "$GUARD" "$MODULE" \
+          "$UNIT_DIR/ricelin-model-route.service" "$UNIT_DIR/ricelin-model-route.timer"
+    rm -rf "$HERMES_PLUGIN" "$OLD_HERMES_PLUGIN" "$OC_PLUGIN"
+
+    if [ -f "$BACKUP/config.yaml" ]; then
+        cp -a "$BACKUP/config.yaml" "$HERMES_CONFIG"
+    fi
+    if [ -f "$BACKUP/opencode.json" ]; then
+        cp -a "$BACKUP/opencode.json" "$OC_CONFIG"
+    elif [ -f "$BACKUP/opencode.absent" ]; then
+        rm -f "$OC_CONFIG"
+    fi
+    rm -f "$STATE_BASE/ricelin/peak.override" "$STATE_BASE/ricelin/model-route/free-exhausted-at"
+    rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/ricelin/peak.log"
+    rm -rf "$HOME/.local/lib/__pycache__"
+    if [ -d "$STATE" ]; then
+        find "$STATE" -mindepth 1 -maxdepth 1 ! -name backup -exec rm -rf {} + 2>/dev/null || true
+    fi
+
+    echo "Model routing: timer, guard, helper and plugins removed; configs restored"
+    exit 0
+fi
+
+mkdir -p "$LOCAL_BIN" "$HOME/.local/lib" "$UNIT_DIR" "$STATE/backup" \
+         "$(dirname "$OC_CONFIG")" "$OC_PLUGIN" "$HERMES_PLUGIN" "$(dirname "$GUARD_CONF")"
+
+# Capture the untouched config once. Re-running the installer must not turn the
+# already-routed file into the new backup.
+if [ ! -f "$BACKUP/config.yaml" ] && [ -f "$HERMES_CONFIG" ]; then
+    cp -a "$HERMES_CONFIG" "$BACKUP/config.yaml"
+fi
+if [ ! -f "$BACKUP/opencode.json" ] && [ ! -f "$BACKUP/opencode.absent" ]; then
+    if [ -f "$OC_CONFIG" ]; then
+        cp -a "$OC_CONFIG" "$BACKUP/opencode.json"
+    else
+        : > "$BACKUP/opencode.absent"
+    fi
+fi
+chmod 700 "$STATE" "$BACKUP" 2>/dev/null || true
+
+# OpenCode Go's documented peak windows have no holiday exception. DeepSeek's
+# own API does exclude Chinese public holidays, so the calendar is available but
+# off by default; set holidays=on to follow DeepSeek's public pricing.
+if [ ! -f "$GUARD_CONF" ]; then
+    write_atomic "$GUARD_CONF" 0644 <<'GUARD_CONF'
+# peakguard: DeepSeek V4 / OpenCode Go peak pricing
+# Go's documented windows are weekday 01:00-04:00 and 06:00-10:00 UTC with no
+# holiday exception. Set holidays=on to also exclude the Chinese public holiday
+# calendar (DeepSeek's own API pricing).
+holidays=off
+GUARD_CONF
+fi
+
+write_atomic "$MODULE" 0644 <<'PEAKGUARD_PY'
+"""Peak-pricing gate and free/paid route for DeepSeek V4.1 Flash.
+
+DeepSeek bills the V4 models at twice the off-peak rate from 01:00-04:00 and
+06:00-10:00 UTC, Monday through Friday; OpenCode Go resells the same models at
+the same rates. OpenCode's free DeepSeek model is preferred whenever its daily
+allowance is available.
+
+This module is the single source of the schedule and the route. The
+``peak-guard`` CLI, the Hermes plugin, the OpenCode plugin and the model router
+all read it.
+
+Holiday pricing: DeepSeek's own API excludes Chinese public holidays; the
+OpenCode Go docs and the models.dev cost data only specify the weekday windows.
+``~/.config/ricelin/peakguard.conf`` selects whether the holiday calendar
+applies. It defaults to off for Go.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import time
+from pathlib import Path
+
+UTC = dt.timezone.utc
+WINDOWS = ((1, 4), (6, 10))
+FREE_MODEL = "deepseek-v4.1-flash-free"
+PAID_MODEL = "deepseek-v4.1-flash"
+FREE_CONTEXT = 200000
+
+HOME = Path.home()
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or (HOME / ".config"))
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (HOME / ".local/state"))
+CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME") or (HOME / ".cache"))
+CONFIG = CONFIG_HOME / "ricelin" / "peakguard.conf"
+STATE = STATE_HOME / "ricelin"
+OVERRIDE = STATE / "peak.override"
+FREE_EXHAUSTED = STATE / "model-route" / "free-exhausted-at"
+LOG = CACHE_HOME / "ricelin" / "peak.log"
+
+FREE_ERROR_MARKERS = (
+    "free usage limit",
+    "free usage exceeded",
+    "freeusagelimiterror",
+    "free models work in opencode",
+    "today's free messages",
+)
+
+# State Council notice 国办发明电〔2025〕7号 (2025-11-04), 2026 public holidays.
+# Only used when holidays=on; Go's documented pricing does not mention them.
+HOLIDAYS = {
+    2026: (
+        ("01-01", "01-03"),  # 元旦
+        ("02-15", "02-23"),  # 春节
+        ("04-04", "04-06"),  # 清明
+        ("05-01", "05-05"),  # 劳动节
+        ("06-19", "06-21"),  # 端午
+        ("09-25", "09-27"),  # 中秋
+        ("10-01", "10-07"),  # 国庆
+    ),
+}
+
+_holiday_cache: dict[int, frozenset[dt.date]] = {}
+
+
+def _setting(name: str) -> str:
+    try:
+        for line in CONFIG.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip().lower() == name:
+                return value.strip().lower()
+    except OSError:
+        pass
+    return ""
+
+
+def holidays_enabled() -> bool:
+    return _setting("holidays") in {"1", "on", "true", "yes"}
+
+
+def holidays(year: int) -> frozenset[dt.date]:
+    """The public holidays of ``year``, when the calendar is enabled."""
+    if not holidays_enabled():
+        return frozenset()
+    cached = _holiday_cache.get(year)
+    if cached is not None:
+        return cached
+    days: set[dt.date] = set()
+    for start, end in HOLIDAYS.get(year, ()):
+        day = dt.date.fromisoformat(f"{year}-{start}")
+        last = dt.date.fromisoformat(f"{year}-{end}")
+        while day <= last:
+            days.add(day)
+            day += dt.timedelta(days=1)
+    _holiday_cache[year] = frozenset(days)
+    return _holiday_cache[year]
+
+
+def is_peak(moment: dt.datetime) -> bool:
+    """True when ``moment`` falls in a published peak window, priced at 2x."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    utc = moment.astimezone(UTC)
+    if utc.weekday() >= 5:  # all of Saturday and Sunday is off-peak
+        return False
+    if utc.date() in holidays(utc.year):
+        return False
+    return any(start <= utc.hour < end for start, end in WINDOWS)
+
+
+def _next_change(moment: dt.datetime) -> dt.datetime | None:
+    """The first UTC instant after ``moment`` where the peak flag flips."""
+    here = is_peak(moment)
+    day = moment.astimezone(UTC).date() - dt.timedelta(days=1)
+    points: list[dt.datetime] = []
+    for offset in range(10):
+        date = day + dt.timedelta(days=offset)
+        points.append(dt.datetime.combine(date, dt.time(0), UTC))
+        for start, end in WINDOWS:
+            points.append(dt.datetime.combine(date, dt.time(start), UTC))
+            points.append(dt.datetime.combine(date, dt.time(end), UTC))
+    for point in sorted(points):
+        if point > moment and is_peak(point) != here:
+            return point
+    return None
+
+
+def override_until() -> dt.datetime | None:
+    """The override's expiry, when one is armed and still in the future."""
+    try:
+        stamp = float(OVERRIDE.read_text().strip())
+    except Exception:
+        return None
+    if stamp <= time.time():
+        return None
+    return dt.datetime.fromtimestamp(stamp, UTC)
+
+
+def free_exhausted(now: dt.datetime | None = None) -> bool:
+    """True when the free bucket was exhausted during the current UTC day."""
+    moment = now or dt.datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    try:
+        stamp = float(FREE_EXHAUSTED.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if stamp <= 0:
+        return False
+    marker = dt.datetime.fromtimestamp(stamp, UTC)
+    if marker.date() == moment.date():
+        return True
+    clear_free_exhausted()
+    return False
+
+
+def free_exhausted_at(now: dt.datetime | None = None) -> int:
+    """The exhaustion epoch, or 0 when it is absent or stale."""
+    if not free_exhausted(now):
+        return 0
+    try:
+        return int(float(FREE_EXHAUSTED.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        return 0
+
+
+def mark_free_exhausted(now: dt.datetime | None = None) -> None:
+    moment = now or dt.datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    try:
+        FREE_EXHAUSTED.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = FREE_EXHAUSTED.with_name(FREE_EXHAUSTED.name + ".tmp")
+        temporary.write_text(str(int(moment.timestamp())) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, FREE_EXHAUSTED)
+    except OSError:
+        pass
+
+
+def clear_free_exhausted() -> None:
+    try:
+        FREE_EXHAUSTED.unlink()
+    except OSError:
+        pass
+
+
+def free_reset(now: dt.datetime | None = None) -> dt.datetime:
+    """The next 00:00 UTC: the free bucket resets on the UTC day boundary."""
+    moment = now or dt.datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    return (moment + dt.timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+
+def state(now: dt.datetime | None = None) -> dict:
+    """The gate's whole answer: schedule, free allowance and the route."""
+    moment = now or dt.datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+
+    scheduled = is_peak(moment)
+    peak = scheduled
+    reason = ""
+    override = override_until()
+    forced = os.environ.get("PEAK_GUARD", "").strip().lower()
+
+    if forced in {"off", "0", "false", "no"}:
+        peak, reason = False, "PEAK_GUARD=off"
+    elif forced in {"peak", "on", "1", "true", "yes"}:
+        peak, reason = True, "PEAK_GUARD=peak"
+    elif scheduled and override is not None:
+        # Only ever opens the gate: an allow cannot make a peak hour cost less.
+        peak, reason = False, "override"
+
+    exhausted = free_exhausted(moment)
+    if exhausted:
+        route = "blocked" if peak else "paid"
+    else:
+        route = "free"
+
+    change = _next_change(moment)
+    return {
+        "peak": peak,
+        "scheduled": scheduled,
+        "reason": reason,
+        "now": moment,
+        "peak_end": change if scheduled and change else None,
+        "next_start": change if not scheduled and change else None,
+        "override_until": override,
+        "holiday_calendar": moment.year in HOLIDAYS,
+        "holidays": holidays_enabled(),
+        "free_exhausted": exhausted,
+        "free_reset": free_reset(moment) if exhausted else None,
+        "route": route,
+    }
+
+
+def route(now: dt.datetime | None = None) -> str:
+    return state(now)["route"]
+
+
+def local_label(moment: dt.datetime) -> str:
+    local = moment.astimezone()
+    today = dt.datetime.now().astimezone().date()
+    fmt = "%H:%M" if local.date() == today else "%a %H:%M"
+    return f"{local.strftime(fmt)} {local.tzname()}".strip()
+
+
+def utc_label(moment: dt.datetime) -> str:
+    return moment.astimezone(UTC).strftime("%H:%M UTC")
+
+
+def notice(s: dict) -> str:
+    """The notification body: the toast clips a paragraph, so this is one line."""
+    if s["route"] == "blocked":
+        return (
+            f"Free quota exhausted until {local_label(s['free_reset'])}. "
+            "Paid Go is blocked during peak."
+        )
+    if s["peak_end"] is not None:
+        return f"2× rates until {local_label(s['peak_end'])}. No paid request was sent."
+    return "2× rates are active. No paid request was sent."
+
+
+def _end_label(s: dict) -> str:
+    if s.get("peak_end") is not None:
+        return f"2× until {local_label(s['peak_end'])}"
+    return "2× rates are active"
+
+
+def _paid_block_text(s: dict) -> str:
+    return (
+        f"OpenCode Go is blocked during peak pricing ({_end_label(s)}). "
+        "Use the free DeepSeek model, wait for the window to end, or "
+        "`peak-guard allow 30m`."
+    )
+
+
+def block_message(s: dict, model: str = "") -> str:
+    """The message a hook returns when a turn or model request must be refused."""
+    if not s["peak"]:
+        return ""
+    name = (model or "").lower()
+    if "-free" in name:
+        if not s["free_exhausted"]:
+            return ""
+        return (
+            "The free OpenCode quota is exhausted and resets at "
+            f"{local_label(s['free_reset'])}. Paid OpenCode Go is blocked "
+            f"during peak pricing ({_end_label(s)}). "
+            "`peak-guard allow 30m` overrides."
+        )
+    # Leave a deliberately different provider (Anthropic, local, ...) alone.
+    if name and "deepseek-v4.1-flash" not in name:
+        return ""
+    return _paid_block_text(s)
+
+
+def blocked_message(s: dict) -> str:
+    """The message for a peak turn when the free bucket is already exhausted."""
+    if s["route"] != "blocked":
+        return ""
+    return (
+        "The free OpenCode quota is exhausted and resets at "
+        f"{local_label(s['free_reset'])}. Paid OpenCode Go is blocked during "
+        f"peak pricing ({_end_label(s)}). `peak-guard allow 30m` overrides."
+    )
+
+
+def paid_blocked_message(s: dict) -> str:
+    """The message for a paid Go request during an effective peak window."""
+    if not s["peak"]:
+        return ""
+    return _paid_block_text(s)
+
+
+def _iso(moment: dt.datetime | None) -> str | None:
+    if moment is None:
+        return None
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def as_json(s: dict) -> dict:
+    return {
+        "peak": s["peak"],
+        "scheduled": s["scheduled"],
+        "reason": s["reason"],
+        "now": _iso(s["now"]),
+        "until": _iso(s["peak_end"]),
+        "next_start": _iso(s["next_start"]),
+        "override_until": _iso(s["override_until"]),
+        "holiday_calendar": s["holiday_calendar"],
+        "holidays": s["holidays"],
+        "tz": s["now"].astimezone().tzname(),
+        "route": s["route"],
+        "free_exhausted": s["free_exhausted"],
+        "free_reset": _iso(s["free_reset"]),
+        "blocked": blocked_message(s),
+        "paid_blocked": paid_blocked_message(s),
+        "notice": notice(s) if s["peak"] or s["route"] == "blocked" else "",
+    }
+
+
+def record(source: str, session: str = "") -> None:
+    """Append one line so a block that nobody watched leaves a trace."""
+    s = state()
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a", encoding="utf-8") as fh:
+            fh.write(
+                f"{_iso(dt.datetime.now(UTC))}\t{source}\t{session or '-'}\t"
+                f"{s['route']}\t{'peak' if s['peak'] else 'off'}\t"
+                f"{_iso(s['peak_end']) or '-'}\n"
+            )
+    except Exception:
+        pass
+
+
+def dump(s: dict) -> str:
+    return json.dumps(as_json(s), separators=(",", ":"))
+PEAKGUARD_PY
+
+write_atomic "$GUARD" 0755 <<'PEAKGUARD_CLI'
+#!/usr/bin/env python3
+"""peak-guard — the door to the DeepSeek / OpenCode Go peak-pricing schedule.
+
+  peak-guard                 where the rate and the free/paid route stand
+  peak-guard status --json   the same, machine-readable
+  peak-guard check           exit 0 when the free/paid route is usable, 75 when blocked
+  peak-guard allow [30m]     open the gate for a while (expiring override)
+  peak-guard deny            drop the override
+  peak-guard record S [ID]   append a block to ~/.cache/ricelin/peak.log
+
+``--at <ISO-8601>`` evaluates any instant instead of now.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+
+import peakguard  # noqa: E402
+
+VERM = "\033[38;2;192;68;43m"
+FLAME = "\033[38;2;255;154;100m"
+CREAM = "\033[38;2;230;214;203m"
+DIM = "\033[38;2;138;125;116m"
+FAINT = "\033[38;2;111;99;91m"
+RST = "\033[0m"
+
+if not (sys.stdout.isatty() and not __import__("os").environ.get("NO_COLOR")):
+    VERM = FLAME = CREAM = DIM = FAINT = RST = ""
+
+
+def parse_at(value: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+
+
+def parse_span(value: str) -> float:
+    """'30m', '2h', '45s', '1d' or a bare number of minutes."""
+    value = value.strip().lower()
+    scale = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if value and value[-1] in scale:
+        return float(value[:-1]) * scale[value[-1]]
+    return float(value) * 60 if value else 1800.0
+
+
+def human(s: dict) -> str:
+    if s["reason"] == "override":
+        head = (
+            f"{VERM}▌{RST} {CREAM}override{RST} {DIM}· gate open until{RST} "
+            f"{CREAM}{peakguard.local_label(s['override_until'])}{RST}"
+        )
+    elif s["peak"]:
+        ends = ""
+        if s["peak_end"] is not None:
+            ends = (
+                f" {DIM}· ends{RST} {CREAM}{peakguard.local_label(s['peak_end'])}"
+                f"{RST} {FAINT}({peakguard.utc_label(s['peak_end'])}){RST}"
+            )
+        head = f"{VERM}▌{RST} {CREAM}peak{RST} {DIM}· 2× rates{RST}{ends}"
+    else:
+        starts = ""
+        if s["next_start"] is not None:
+            starts = (
+                f" {DIM}· peak starts{RST} {CREAM}{peakguard.local_label(s['next_start'])}"
+                f"{RST} {FAINT}({peakguard.utc_label(s['next_start'])}){RST}"
+            )
+        head = f"{DIM}▫{RST} {CREAM}off-peak{RST}{starts}"
+
+    route = {
+        "free": f"{CREAM}free{RST} {DIM}· DeepSeek V4.1 Flash Free{RST}",
+        "paid": f"{FLAME}paid{RST} {DIM}· OpenCode Go{RST}",
+        "blocked": f"{VERM}blocked{RST} {DIM}· free exhausted, Go refused{RST}",
+    }[s["route"]]
+    line = f"  {head}\n  {FAINT}▏{RST}  {route}"
+    if s["free_exhausted"] and s["free_reset"] is not None:
+        line += f" {DIM}· free resets{RST} {CREAM}{peakguard.local_label(s['free_reset'])}{RST}"
+    note = "Mon–Fri 01–04, 06–10 UTC · CN holidays " + ("on" if s["holidays"] else "off")
+    if not s["holiday_calendar"]:
+        note += " · calendar not published for this year"
+    return f"{line}\n  {FAINT}▏{RST}  {DIM}{note}{RST}"
+
+
+def main(argv: list[str]) -> int:
+    args = list(argv[1:])
+    at = None
+    if "--at" in args:
+        index = args.index("--at")
+        try:
+            at = parse_at(args[index + 1])
+        except Exception as exc:
+            print(f"peak-guard: bad --at value: {exc}", file=sys.stderr)
+            return 2
+        del args[index:index + 2]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    command = args[0] if args else "status"
+    rest = args[1:]
+
+    if command in {"status", "json"}:
+        s = peakguard.state(at)
+        print(peakguard.dump(s) if (as_json or command == "json") else human(s))
+        return 0
+
+    if command == "check":
+        s = peakguard.state(at)
+        if s["route"] == "blocked":
+            print(peakguard.blocked_message(s), file=sys.stderr)
+            return 75
+        return 0
+
+    if command == "allow":
+        seconds = parse_span(rest[0] if rest else "30m")
+        expiry = time.time() + seconds
+        peakguard.OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+        peakguard.OVERRIDE.write_text(f"{expiry:.0f}\n")
+        until = dt.datetime.fromtimestamp(expiry, peakguard.UTC)
+        s = peakguard.state()
+        tail = "2× resumes after that" if s["scheduled"] else "off-peak anyway"
+        print(
+            f"  {FLAME}▫{RST} {CREAM}allowed{RST} {DIM}until{RST} "
+            f"{CREAM}{peakguard.local_label(until)}{RST} {FAINT}· {tail}{RST}"
+        )
+        return 0
+
+    if command == "deny":
+        try:
+            peakguard.OVERRIDE.unlink()
+        except FileNotFoundError:
+            pass
+        print(f"  {DIM}▫{RST} {CREAM}override cleared{RST}")
+        return 0
+
+    if command == "record":
+        peakguard.record(rest[0] if rest else "unknown", rest[1] if len(rest) > 1 else "")
+        return 0
+
+    print(f"peak-guard: unknown command {command!r}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+PEAKGUARD_CLI
+
+write_atomic "$ROUTER" 0755 <<'ROUTER_PY'
+#!/usr/bin/env python3
+"""Move DeepSeek V4.1 Flash between the free OpenCode model and OpenCode Go.
+
+The schedule and the free/paid route live in ~/.local/lib/peakguard.py. This
+script only applies that route to OpenCode and Hermes and notices when a free
+request has failed.
+
+Free first, paid Go only outside peak, free attempted during peak even when the
+free bucket is exhausted. Safe to run every minute.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path.home() / ".local/lib"))
+import peakguard  # noqa: E402
+
+FREE_PROVIDER = "opencode"
+PAID_PROVIDER = "opencode-go"
+FREE_MODEL = peakguard.FREE_MODEL
+PAID_MODEL = peakguard.PAID_MODEL
+FREE_CONTEXT = peakguard.FREE_CONTEXT
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or (HOME / ".config"))
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (HOME / ".local/state"))
+DATA_HOME = Path(os.environ.get("XDG_DATA_HOME") or (HOME / ".local/share"))
+HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (HOME / ".hermes"))
+
+STATE = STATE_HOME / "ricelin" / "model-route"
+ROUTE_FILE = STATE / "route.json"
+OC_CONFIG = CONFIG / "opencode" / "opencode.json"
+OC_DB = DATA_HOME / "opencode" / "opencode.db"
+OC_LOG = DATA_HOME / "opencode" / "log" / "opencode.log"
+HERMES_CONFIG = HERMES_HOME / "config.yaml"
+HERMES_LOGS = tuple(
+    HERMES_HOME / "logs" / name
+    for name in ("errors.log", "agent.log", "gateway.log", "gui.log")
+)
+
+QUOTA_MARKERS = peakguard.FREE_ERROR_MARKERS
+FREE_RE = re.compile(r'billing_source\\?"?\s*:\s*\\?"?free')
+TS_RE = re.compile(r"timestamp=([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)")
+
+
+def use_free(route: str) -> bool:
+    return route in ("free", "blocked")
+
+
+def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(temporary, mode)
+    except OSError:
+        pass
+    os.replace(temporary, path)
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def parse_ts(line: str) -> int:
+    match = TS_RE.search(line)
+    if not match:
+        return 0
+    value = match.group(1)
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return int(
+                datetime.strptime(value, fmt).replace(tzinfo=timezone.utc).timestamp()
+            )
+        except ValueError:
+            continue
+    return 0
+
+
+def scan_file(path: Path, offset: int, strict: bool = True):
+    """Read complete new lines; return (offset, last quota, last free success).
+
+    ``strict`` keeps the OpenCode scan to real error/diagnostic lines. Its log
+    also records shell commands and tool output, so a command that merely
+    mentions "billing_source free" must not look like a successful request.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return offset, 0, 0
+    if size < offset:
+        offset = 0
+    if size == offset:
+        return offset, 0, 0
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            data = handle.read(size - offset)
+    except OSError:
+        return offset, 0, 0
+
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        return offset, 0, 0
+    complete = data[: cut + 1]
+    new_offset = offset + cut + 1
+
+    quota_at = 0
+    free_at = 0
+    for line in complete.decode("utf-8", "ignore").splitlines():
+        low = line.lower()
+        stamp = parse_ts(line) or int(time.time())
+        is_error = (
+            not strict
+            or "level=error" in low
+            or "ai.error" in low
+            or "quotaexceeded" in low
+        )
+        if is_error and any(marker in low for marker in QUOTA_MARKERS):
+            quota_at = max(quota_at, stamp)
+        if (not strict or "session generation usage diagnostic" in low) and FREE_RE.search(low):
+            free_at = max(free_at, stamp)
+    return new_offset, quota_at, free_at
+
+
+def load_state() -> dict:
+    state = read_json(ROUTE_FILE, {})
+    if not isinstance(state, dict):
+        state = {}
+    state.setdefault("opencode_log_offset", 0)
+    state.setdefault("hermes_log_offsets", {})
+    return state
+
+
+def save_state(state: dict) -> None:
+    atomic_write(
+        ROUTE_FILE,
+        json.dumps(state, indent=2, sort_keys=True) + "\n",
+        0o600,
+    )
+
+
+def strip_jsonc(text: str) -> str:
+    """Remove // and /* */ comments and trailing commas before JSON parsing."""
+    out = []
+    index = 0
+    length = len(text)
+    in_string = False
+    escaped = False
+    line_comment = False
+    block_comment = False
+    while index < length:
+        char = text[index]
+        following = text[index + 1] if index + 1 < length else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+                out.append(char)
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and following == "/":
+                block_comment = False
+                index += 2
+                continue
+            if char == "\n":
+                out.append(char)
+            index += 1
+            continue
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and following == "*":
+            block_comment = True
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+def edit_hermes_model(text: str, free: bool) -> str:
+    """Change only the active keys in the top-level model: block."""
+    lines = text.splitlines(keepends=True)
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r"^model:\s*(?:#.*)?\n?$", line):
+            start = index
+            break
+    if start is None:
+        return text
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            end = index
+            break
+
+    block = lines[start + 1 : end]
+
+    def find_key(key: str):
+        pattern = re.compile(rf"^  {re.escape(key)}:\s*")
+        for index, line in enumerate(block):
+            if pattern.match(line):
+                return index
+        return None
+
+    def set_key(key: str, value: str, quote: bool = True) -> None:
+        index = find_key(key)
+        line = f'  {key}: "{value}"\n' if quote else f"  {key}: {value}\n"
+        if index is None:
+            block.append(line)
+        else:
+            block[index] = line
+
+    def remove_key(key: str) -> None:
+        index = find_key(key)
+        if index is None:
+            return
+        del block[index]
+        while index < len(block) and (
+            block[index].startswith("    ") or block[index].startswith("\t")
+        ):
+            del block[index]
+
+    def set_header(name: str, value: str) -> None:
+        index = find_key("default_headers")
+        if index is None:
+            anchor = find_key("api_key")
+            at = anchor + 1 if anchor is not None else len(block)
+            block[at:at] = [
+                "  default_headers:\n",
+                f'    {name}: "{value}"\n',
+            ]
+            return
+        cursor = index + 1
+        while cursor < len(block) and (
+            block[cursor].startswith("    ") or block[cursor].startswith("\t")
+        ):
+            if re.match(rf"^    {re.escape(name)}:\s*", block[cursor]):
+                block[cursor] = f'    {name}: "{value}"\n'
+                return
+            cursor += 1
+        block.insert(cursor, f'    {name}: "{value}"\n')
+
+    def remove_header(name: str) -> None:
+        index = find_key("default_headers")
+        if index is None:
+            return
+        cursor = index + 1
+        while cursor < len(block) and (
+            block[cursor].startswith("    ") or block[cursor].startswith("\t")
+        ):
+            if re.match(rf"^    {re.escape(name)}:\s*", block[cursor]):
+                del block[cursor]
+                break
+            cursor += 1
+        if index + 1 >= len(block) or not block[index + 1].startswith(("    ", "\t")):
+            del block[index]
+
+    if free:
+        set_key("default", FREE_MODEL)
+        set_key("provider", "custom")
+        set_key("base_url", "https://opencode.ai/inference/openai/v1")
+        set_key("api_key", "${OPENCODE_GO_API_KEY}")
+        set_key("context_length", str(FREE_CONTEXT), quote=False)
+        set_header("User-Agent", "opencode/2.2.5")
+    else:
+        set_key("default", PAID_MODEL)
+        set_key("provider", PAID_PROVIDER)
+        set_key("base_url", "https://opencode.ai/zen/go/v1")
+        remove_key("api_key")
+        remove_key("context_length")
+        remove_header("User-Agent")
+
+    return "".join(lines[: start + 1] + block + lines[end:])
+
+
+def update_opencode(route: str, peak: bool) -> bool:
+    data = {}
+    if OC_CONFIG.exists():
+        try:
+            data = json.loads(strip_jsonc(OC_CONFIG.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            print(f"model route: cannot parse {OC_CONFIG}: {exc}", file=sys.stderr)
+            return False
+        if not isinstance(data, dict):
+            print(f"model route: {OC_CONFIG} is not a JSON object", file=sys.stderr)
+            return False
+
+    before = json.dumps(data, sort_keys=True)
+    data.setdefault("$schema", "https://opencode.ai/config.json")
+    data["model"] = (
+        f"{FREE_PROVIDER}/{FREE_MODEL}"
+        if use_free(route)
+        else f"{PAID_PROVIDER}/{PAID_MODEL}"
+    )
+
+    policies = data.get("policies") or []
+    if not isinstance(policies, list):
+        policies = []
+    policies = [
+        policy
+        for policy in policies
+        if not (
+            isinstance(policy, dict)
+            and policy.get("action") == "provider.use"
+            and policy.get("resource") == PAID_PROVIDER
+        )
+    ]
+    if peak:
+        policies.append(
+            {"action": "provider.use", "resource": PAID_PROVIDER, "effect": "deny"}
+        )
+    if policies:
+        data["policies"] = policies
+    else:
+        data.pop("policies", None)
+
+    if json.dumps(data, sort_keys=True) == before:
+        return False
+    atomic_write(OC_CONFIG, json.dumps(data, indent=2) + "\n", 0o644)
+    return True
+
+
+def update_hermes(route: str) -> bool:
+    try:
+        text = HERMES_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    updated = edit_hermes_model(text, use_free(route))
+    if updated == text:
+        return False
+    try:
+        mode = os.stat(HERMES_CONFIG).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    atomic_write(HERMES_CONFIG, updated, mode)
+    return True
+
+
+def update_sessions(route: str) -> bool:
+    """Move non-archived OpenCode sessions to the same model as the config."""
+    if not OC_DB.exists():
+        return False
+    target = (FREE_PROVIDER, FREE_MODEL) if use_free(route) else (PAID_PROVIDER, PAID_MODEL)
+    previous = (PAID_PROVIDER, PAID_MODEL) if use_free(route) else (FREE_PROVIDER, FREE_MODEL)
+    changed = False
+    try:
+        connection = sqlite3.connect(f"file:{OC_DB}?mode=rw", uri=True, timeout=5)
+        connection.execute("PRAGMA busy_timeout=5000")
+        rows = connection.execute(
+            "SELECT id, model FROM session_v2 "
+            "WHERE time_archived IS NULL AND time_suspended IS NULL"
+        ).fetchall()
+        for session_id, raw in rows:
+            try:
+                model = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(model, dict):
+                continue
+            if model.get("providerID") != previous[0] or model.get("id") != previous[1]:
+                continue
+            model["providerID"] = target[0]
+            model["id"] = target[1]
+            if model.get("variant") not in ("low", "high", "max"):
+                model.pop("variant", None)
+            connection.execute(
+                "UPDATE session_v2 SET model = ?, time_updated = ? WHERE id = ?",
+                (
+                    json.dumps(model, separators=(",", ":")),
+                    int(time.time() * 1000),
+                    session_id,
+                ),
+            )
+            changed = True
+        if changed:
+            connection.commit()
+        connection.close()
+    except sqlite3.Error as exc:
+        print(f"model route: cannot update OpenCode sessions: {exc}", file=sys.stderr)
+        return False
+    return changed
+
+
+def reload_opencode() -> None:
+    if not shutil.which("opencode"):
+        return
+    try:
+        running = subprocess.run(
+            ["pgrep", "-f", r"opencode.*serve"],
+            capture_output=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if running.returncode != 0:
+        return
+    try:
+        subprocess.run(
+            ["opencode", "reload"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def main() -> int:
+    moment = datetime.now(timezone.utc)
+    try:
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(STATE, 0o700)
+    except OSError:
+        pass
+
+    state = load_state()
+    marker = peakguard.free_exhausted_at(moment)
+
+    offset, quota_at, free_at = scan_file(
+        OC_LOG, int(state.get("opencode_log_offset", 0))
+    )
+    state["opencode_log_offset"] = offset
+    if quota_at > marker:
+        peakguard.mark_free_exhausted(datetime.fromtimestamp(quota_at, timezone.utc))
+        marker = quota_at
+    elif free_at > marker and free_at >= int(moment.timestamp()) - 86400:
+        peakguard.clear_free_exhausted()
+        marker = 0
+
+    offsets = state.get("hermes_log_offsets")
+    if not isinstance(offsets, dict) or not offsets:
+        # First run: the plugin covers new failures. Do not rescan old Hermes
+        # logs, because an old quota line would look current (their timestamps
+        # are not in the OpenCode `timestamp=` shape).
+        offsets = {}
+        for path in HERMES_LOGS:
+            try:
+                offsets[str(path)] = path.stat().st_size
+            except OSError:
+                offsets[str(path)] = 0
+    for path in HERMES_LOGS:
+        key = str(path)
+        offset, failed_at, _ = scan_file(path, int(offsets.get(key, 0)), strict=False)
+        offsets[key] = offset
+        if failed_at > marker:
+            peakguard.mark_free_exhausted(datetime.fromtimestamp(failed_at, timezone.utc))
+            marker = failed_at
+    state["hermes_log_offsets"] = offsets
+
+    gate = peakguard.state(moment)
+    route = gate["route"]
+    effective_peak = gate["peak"]
+
+    changed_opencode = update_opencode(route, effective_peak)
+    changed_hermes = update_hermes(route)
+    changed_sessions = update_sessions(route)
+    if changed_opencode:
+        reload_opencode()
+
+    state["last_route"] = route
+    state["updated_at"] = int(moment.timestamp())
+    save_state(state)
+
+    if changed_opencode or changed_hermes or changed_sessions:
+        print(
+            f"model route: {route} "
+            f"({'peak' if effective_peak else 'off-peak'}, "
+            f"free {'exhausted' if gate['free_exhausted'] else 'available'})"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+ROUTER_PY
+
+write_atomic "$UNIT_DIR/ricelin-model-route.service" 0644 <<'UNIT'
+[Unit]
+Description=Route DeepSeek V4.1 Flash between the free OpenCode model and OpenCode Go
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ricelin-model-route
+UNIT
+
+write_atomic "$UNIT_DIR/ricelin-model-route.timer" 0644 <<'UNIT'
+[Unit]
+Description=Run the Ricelin model router every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+write_atomic "$HERMES_PLUGIN/plugin.yaml" 0644 <<'HERMES_GUARD_MANIFEST'
+name: peak-guard
+label: Peak Pricing Guard
+kind: standalone
+version: 1.0.0
+description: >
+  Blocks paid OpenCode Go during DeepSeek peak pricing and records free-quota
+  exhaustion so the Ricelin model router can switch to the free model.
+requires_hermes: ">=0.21.6"
+provides_tools: []
+provides_hooks:
+  - pre_llm_call
+  - api_request_error
+HERMES_GUARD_MANIFEST
+
+write_atomic "$HERMES_PLUGIN/__init__.py" 0644 <<'HERMES_GUARD_PLUGIN'
+"""peak-guard — block paid Go during peak and record free-quota failures.
+
+``pre_llm_call`` runs once per turn before the provider is called. Returning
+``{"action": "block", "message": ...}`` ends the turn with that message and no
+inference request, covering the CLI, desktop app, gateway and cron. This is the
+place a manual `/model` switch to paid Go is refused during peak.
+
+``api_request_error`` only records a free-quota failure; the router reads the
+marker and moves both tools at the next pass.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_LIB = Path.home() / ".local/lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+import peakguard  # noqa: E402
+
+__all__ = ["register"]
+
+
+def _pre_llm_call(model: str = "", session_id: str = "", **_: object):
+    try:
+        state = peakguard.state()
+        message = peakguard.block_message(state, model)
+        if message:
+            peakguard.record("hermes", session_id)
+            return {"action": "block", "message": message}
+    except Exception:
+        return None
+    return None
+
+
+def _on_api_request_error(**kwargs: object) -> None:
+    try:
+        text = " ".join(
+            str(kwargs.get(key) or "")
+            for key in ("error", "error_message", "error_body", "reason", "status_code")
+        ).lower()
+        if any(marker in text for marker in peakguard.FREE_ERROR_MARKERS):
+            peakguard.mark_free_exhausted()
+            peakguard.record("hermes-quota", str(kwargs.get("session_id") or ""))
+    except Exception:
+        pass
+
+
+def register(ctx) -> None:  # pragma: no cover - registered by the plugin loader
+    ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("api_request_error", _on_api_request_error)
+HERMES_GUARD_PLUGIN
+
+write_atomic "$OC_PLUGIN/index.ts" 0644 <<'OC_GUARD_PLUGIN'
+import { Plugin } from "@opencode/plugin"
+import { spawn, spawnSync } from "node:child_process"
+
+/**
+ * Peak pricing and free-quota guard.
+ *
+ * DeepSeek bills the V4 models at 2x between 01:00-04:00 and 06:00-10:00 UTC,
+ * Monday to Friday, and OpenCode Go resells them at the same rates. The router
+ * prefers the free OpenCode model; this plugin refuses a paid Go request during
+ * peak and refuses a turn entirely when the free bucket is exhausted during
+ * peak (paid Go is not a fallback there).
+ *
+ * The schedule and route live in ~/.local/lib/peakguard.py; this asks
+ * `peak-guard status --json` rather than carrying a second copy. A missing or
+ * broken CLI fails open and says so once on stderr.
+ */
+
+const CLI = `${process.env.HOME}/.local/bin/peak-guard`
+
+type Status = {
+    route: "free" | "paid" | "blocked"
+    peak: boolean
+    free_exhausted: boolean
+    free_reset: string | null
+    until: string | null
+    blocked: string
+    paid_blocked: string
+    notice: string
+}
+
+let warned = false
+let lastNotice = 0
+let cached: { at: number; value: Status | null } | null = null
+
+function status(): Status | null {
+    if (cached && Date.now() - cached.at < 5000) return cached.value
+    try {
+        const out = spawnSync(CLI, ["status", "--json"], { encoding: "utf8", timeout: 2000 })
+        if (out.status !== 0 || !out.stdout) throw new Error(out.stderr || "no output")
+        cached = { at: Date.now(), value: JSON.parse(out.stdout) as Status }
+        return cached.value
+    } catch (error) {
+        if (!warned) {
+            warned = true
+            console.error(`peak-guard: cannot read the schedule (${error}); allowing usage`)
+        }
+        cached = { at: Date.now(), value: null }
+        return null
+    }
+}
+
+function detach(command: string, args: string[]) {
+    try {
+        const child = spawn(command, args, { stdio: "ignore" })
+        child.on("error", () => {})
+        child.unref()
+    } catch {}
+}
+
+/** The TUI only shows an empty 500 for a prompt-hook throw (opencode#55212). */
+function announce(s: Status, sessionID: string) {
+    if (Date.now() - lastNotice < 10 * 60 * 1000) return
+    lastNotice = Date.now()
+    detach(CLI, ["record", "opencode", sessionID || ""])
+    if (s.notice) {
+        detach("notify-send", ["-a", "Peak guard", "-u", "normal", "Peak pricing", s.notice])
+    }
+}
+
+function refuse(message: string, s: Status, sessionID: string): never {
+    announce(s, sessionID)
+    throw new Error(message)
+}
+
+export default Plugin.define({
+    id: "ricelin.peak-guard",
+    async setup(ctx: any) {
+        // Paid Go during peak: refuse even if the user selected it by hand.
+        await ctx.session.hook(
+            "model.request",
+            (event: any) => {
+                const s = status()
+                if (s?.paid_blocked) refuse(s.paid_blocked, s, event?.sessionID ?? "")
+            },
+            { providerID: "opencode-go" },
+        )
+
+        // Free provider during peak with the daily bucket exhausted: refuse the
+        // request rather than letting it fail with a generic quota error.
+        await ctx.session.hook(
+            "model.request",
+            (event: any) => {
+                const s = status()
+                if (s?.route === "blocked") refuse(s.blocked, s, event?.sessionID ?? "")
+            },
+            { providerID: "opencode" },
+        )
+    },
+})
+OC_GUARD_PLUGIN
+
+# The old implementation used a separate Hermes plugin. Remove it so two
+# quota observers do not race each other.
+hermes=$(hermes_bin)
+if [ -n "$hermes" ]; then
+    "$hermes" plugins disable ricelin-model-route >/dev/null 2>&1 || true
+fi
+rm -rf "$OLD_HERMES_PLUGIN"
+
+"$ROUTER" || true
+
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+if systemctl --user enable --now ricelin-model-route.timer >/dev/null 2>&1; then
+    echo "Model routing: free first; Go outside peak; Go refused during peak"
+else
+    echo "Model routing: helper installed; enable ricelin-model-route.timer in your user session" >&2
+fi
+
+if [ -n "$hermes" ]; then
+    "$hermes" plugins enable peak-guard >/dev/null 2>&1 \
+        || echo "Hermes: could not enable peak-guard; run 'hermes plugins enable peak-guard'" >&2
+    reload_gateway
+else
+    echo "Hermes is not installed yet; the peak-guard plugin will wait under $HERMES_PLUGIN" >&2
+fi
+
+rm -rf "$HOME/.local/lib/__pycache__" "$HERMES_PLUGIN/__pycache__"
+)
+
+# ---------------------------------------------------------------- stage_nightlight_ramp
 stage_nightlight_ramp() (
 # Fade the scheduled night light instead of switching at the minute.
 #
@@ -6933,7 +9642,7 @@ stage_nightlight_ramp() (
 # the same way. A matching change in NightLight.qml keeps the live IPC push on
 # the same curve, so changing a setting mid-fade does not jump to the target.
 #
-# `installer stage --revert` restores the two-profile abrupt schedule.
+# A direct --revert restores the two-profile abrupt schedule.
 
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -7244,6 +9953,7 @@ fi
 echo "Night light: $([ "$MODE" = apply ] && echo '5-minute fade in and out' || echo 'abrupt schedule restored')."
 )
 
+# ---------------------------------------------------------------- stage_display_mode
 stage_display_mode() (
 # Pin every active monitor to its native resolution and highest refresh rate.
 #
@@ -7264,6 +9974,7 @@ command -v hyprctl >/dev/null 2>&1 || {
 
 python3 - "$MONITORS" <<'PY'
 import json
+import os
 import re
 import subprocess
 import sys
@@ -7354,7 +10065,13 @@ if not written:
     print("No usable modes; leaving autodetection in place.")
     sys.exit(0)
 
-path.write_text("\n".join(lines).rstrip() + "\n")
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
+os.replace(tmp, path)
 print("Display: " + ", ".join(written))
 PY
 
@@ -7365,6 +10082,7 @@ fi
 echo "Display: native resolution at the panel's highest refresh."
 )
 
+# ---------------------------------------------------------------- stage_clipboard_scroll
 stage_clipboard_scroll() (
 # Make the clipboard history glide instead of snapping row by row.
 #
@@ -7382,6 +10100,7 @@ RESTART="$CONFIG/hypr/scripts/ricelin"
 [ -f "$CLIP" ] || { echo "Clipboard.qml not found at $CLIP" >&2; exit 1; }
 
 python3 - "$CLIP" <<'PY'
+import os
 import sys
 from pathlib import Path
 
@@ -7404,6 +10123,10 @@ if "// ricelin-smooth-wheel" not in text:
 if changed:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     tmp.replace(path)
 PY
 
@@ -7414,6 +10137,7 @@ fi
 echo "Clipboard: wheel scrolling is continuous."
 )
 
+# ---------------------------------------------------------------- stage_wallpaper_center
 stage_wallpaper_center() (
 # Keep the SUPER+C wallpaper strip centred on the active wallpaper.
 #
@@ -7473,6 +10197,10 @@ if "// ricelin-wallpaper-center" not in text:
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
 PY
 
@@ -7483,6 +10211,7 @@ fi
 echo "Wallpaper strip: centres on the active wallpaper after a cold start."
 )
 
+# ---------------------------------------------------------------- stage_lock_theme
 stage_lock_theme() (
 # Make the Quickshell lock follow the live palette in both tones.
 #
@@ -7506,10 +10235,21 @@ LOCK="$CONFIG/quickshell/lock"
 }
 
 python3 - "$LOCK" <<'PY'
+import os
 import sys
 from pathlib import Path
 
 lock = Path(sys.argv[1])
+
+
+def save(path, text):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
+    os.replace(tmp, path)
 
 # 1. Dyn: expose the palette surface so the lock can tint its scrim.
 dyn = lock / "Singletons" / "Dyn.qml"
@@ -7525,7 +10265,7 @@ if "readonly property string surface:" not in text:
     if old not in text:
         sys.exit("Dyn.qml JsonAdapter block did not match")
     text = text.replace(old, new, 1)
-    dyn.write_text(text)
+    save(dyn, text)
 
 # 2. Theme: tone-aware scrim and backdrop darkening.
 theme = lock / "Singletons" / "Theme.qml"
@@ -7541,7 +10281,7 @@ if "readonly property color surface:" not in text:
     if old not in text:
         sys.exit("Theme.qml dyn block did not match")
     text = text.replace(old, new, 1)
-    theme.write_text(text)
+    save(theme, text)
 
 # 3. LockSurface: use the tone-aware darken and add the scrim above the blur.
 surface = lock / "LockSurface.qml"
@@ -7565,21 +10305,21 @@ if "color: Theme.scrim" not in text:
     if old not in text:
         sys.exit("LockSurface.qml GlowField anchor did not match")
     text = text.replace(old, new, 1)
-    surface.write_text(text)
+    save(surface, text)
 
 # 4. shell.qml: no dark-brown flash before the grab is ready.
 shell = lock / "shell.qml"
 text = shell.read_text()
 if 'color: "#160f0a"' in text:
     text = text.replace('color: "#160f0a"', "color: Theme.surface", 1)
-    shell.write_text(text)
+    save(shell, text)
 
 # 5. Content.qml: the cover placeholder follows the palette too.
 content = lock / "Content.qml"
 text = content.read_text()
 if 'color: "#1a100c"' in text:
     text = text.replace('color: "#1a100c"', "color: Theme.surface", 1)
-    content.write_text(text)
+    save(content, text)
 PY
 
 if [ -x "$CONFIG/hypr/scripts/ricelin" ] && qs -c lock ipc show >/dev/null 2>&1; then
@@ -7589,6 +10329,7 @@ fi
 echo "Lock screen: palette scrim follows the live light/dark tone."
 )
 
+# ---------------------------------------------------------------- stage_portal_scheme
 stage_portal_scheme() (
 set -eu
 WALLCOLORS="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/wallcolors.py"
@@ -7617,6 +10358,10 @@ if marker not in text:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        pass
     os.replace(tmp, path)
     print("portal colour-scheme hook installed")
 else:
@@ -7645,7 +10390,8 @@ PY
 
 # ---------------------------------------------------------------- stage_diff_only_update
 stage_diff_only_update() (
-# installer stage — make `ricelin update` touch only what upstream changed.
+# Diff-only updater stage — make `ricelin update` touch only what upstream
+# changed.
 #
 # The engine redeployed every upstream file on every apply, so even a one-commit
 # update rewrote all of ~/.config/quickshell and hypr/scripts and reverted every
@@ -7660,18 +10406,18 @@ stage_diff_only_update() (
 # update would revert local edits again. So this is the one script that does NOT
 # need re-running after `ricelin update`.
 #
-#   sh installer stage              apply (idempotent)
-#   sh installer stage --revert     put upstream's engine back, byte for byte
-#   sh installer stage --selftest   run the scenario matrix in a temp tree
+# install.sh applies this stage. The function also accepts --revert and
+# --selftest for targeted use.
 set -eu
 
 ENGINE="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/ricelin-update.py"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/ricelin"
+# Keep the legacy directory name so snapshots from older installs still revert.
 BACKUP="$STATE/24-diff-only-update"
 MARKER="ricelin-diff-only-update"
 
 say() { printf '%s\n' "$*"; }
-die() { printf '%s\n' "24-diff-only-update: $*" >&2; exit 1; }
+die() { printf '%s\n' "diff-only-update: $*" >&2; exit 1; }
 
 [ -f "$ENGINE" ] || die "update engine not found ($ENGINE)"
 
@@ -7688,7 +10434,7 @@ import json, os, subprocess, sys, tempfile
 from pathlib import Path
 
 ENGINE = Path(os.environ["ENGINE"])
-root = Path(tempfile.mkdtemp(prefix="ricelin-24-selftest-"))
+root = Path(tempfile.mkdtemp(prefix="ricelin-diff-selftest-"))
 up, cfg, state, data = root / "upstream", root / "config", root / "state", root / "data"
 fails = []
 
@@ -8067,7 +10813,7 @@ src = src[:start] + NEW + src[end:]
 # ── 4. run(): first run deploys everything, later runs reconcile the diff ────
 first = "        code_changed = sync_code(clone, config_root, head, apply)\n"
 if src.count(first) != 1:
-    sys.exit("24-diff-only-update: first-run anchor moved; refusing to patch")
+    sys.exit("diff-only-update: first-run anchor moved; refusing to patch")
 src = src.replace(first, "        code_changed = deploy_all(clone, config_root, head, apply)\n")
 
 old = """    rows, conflicts, sha_updates = reconcile_protected(
@@ -8078,15 +10824,21 @@ new = """    rows, conflicts, code_changed = reconcile_files(
         clone, config_root, manifest, head, base, apply, take)
 """
 if src.count(old) != 1:
-    sys.exit("24-diff-only-update: apply anchor moved; refusing to patch")
+    sys.exit("diff-only-update: apply anchor moved; refusing to patch")
 src = src.replace(old, new)
 
 stale = "        manifest.setdefault(\"modules\", {}).update(sha_updates)\n"
 if src.count(stale) != 1:
-    sys.exit("24-diff-only-update: manifest anchor moved; refusing to patch")
+    sys.exit("diff-only-update: manifest anchor moved; refusing to patch")
 src = src.replace(stale, "")
 
-path.write_text(src)
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text(src, encoding="utf-8")
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
+os.replace(tmp, path)
 print("__CHANGED__ 1")
 PY
 

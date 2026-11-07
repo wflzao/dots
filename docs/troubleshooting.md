@@ -34,7 +34,7 @@ full output to the terminal as well.
   sudo pacman -S --needed git curl python jq systemd
   ```
 
-- Free at least 1 GiB under `$HOME`.
+- Free at least 3 GiB under `$HOME` (8 GiB recommended with Hermes Desktop).
 - Check network:
 
   ```sh
@@ -104,6 +104,67 @@ nvidia-smi
 command -v nvibrant
 systemctl --user status nvibrant-75.service
 ```
+
+## Model routing
+
+Inspect the schedule, route and state:
+
+```sh
+~/.local/bin/peak-guard status
+~/.local/bin/peak-guard status --json
+systemctl --user status ricelin-model-route.timer
+cat ~/.local/state/ricelin/model-route/route.json
+cat ~/.local/state/ricelin/model-route/free-exhausted-at 2>/dev/null
+```
+
+Check the two configs:
+
+```sh
+opencode debug config | grep -A4 '"model"'
+hermes config get model
+```
+
+Common causes:
+
+- the timer is not enabled: `systemctl --user enable --now
+  ricelin-model-route.timer`;
+- Hermes has no `OPENCODE_GO_API_KEY` in `~/.hermes/.env`, so the free route
+  cannot authenticate; add the key and restart the Hermes gateway;
+- the free allowance is exhausted: it is shared by every free OpenCode model,
+  keyed by IP, and resets at 00:00 UTC. During peak hours `peak-guard` refuses
+  paid Go and the free request fails, so wait for the reset;
+- a build is caught mid-refactor while peak starts: `peak-guard allow 30m`
+  opens an expiring override; `peak-guard deny` closes it;
+- OpenCode was updated and no longer accepts `opencode/2.2.5` for the free
+  endpoint; update the user agent in `~/.local/bin/ricelin-model-route` and
+  `~/.hermes/config.yaml`;
+- the holiday calendar behaves unexpectedly: it is **off** by default. Set
+  `holidays=on` in `~/.config/ricelin/peakguard.conf` only if OpenCode Go is
+  confirmed to honour DeepSeek's Chinese-holiday pricing.
+
+Force one router pass:
+
+```sh
+~/.local/bin/ricelin-model-route
+```
+
+Remove the router and restore the configs captured on first install:
+
+```sh
+systemctl --user disable --now ricelin-model-route.timer
+rm -f ~/.local/lib/peakguard.py ~/.local/bin/peak-guard \
+      ~/.local/bin/ricelin-model-route \
+      ~/.config/systemd/user/ricelin-model-route.service \
+      ~/.config/systemd/user/ricelin-model-route.timer
+rm -rf ~/.hermes/plugins/peak-guard ~/.config/opencode/plugins/peak-guard
+# The first install saved the untouched configs here:
+ls ~/.local/state/ricelin/model-route/backup/
+```
+
+Restore `backup/config.yaml` over `~/.hermes/config.yaml`, and either restore
+`backup/opencode.json` over `~/.config/opencode/opencode.json` or delete
+`opencode.json` when `backup/opencode.absent` exists. Disable the Hermes
+plugin with `hermes plugins disable peak-guard`.
 
 ## Customisation (26)
 

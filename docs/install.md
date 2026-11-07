@@ -26,11 +26,72 @@ re-run safely.
 - Pins each active monitor to its native resolution and highest refresh rate.
 - Rebuilds the terminal's 16 ANSI colours with readable, conventional hues and
   a clear selection highlight; fixes KDE selection text and active colours.
+- Caches matugen palette lookups per tone and skips rewriting palette files
+  when the bytes have not changed.
+- Enables `misc:vrr = 1` so a static desktop can idle below the panel's maximum
+  refresh rate.
 - Makes clipboard history wheel scrolling continuous.
+- Feeds the pill's agent line from Claude Code, OpenCode and Hermes, and calls
+  the source "AI agent" and the module "Activity".
+- Routes DeepSeek V4.1 Flash between OpenCode's free model and OpenCode Go:
+  free first, Go only outside the weekday 01:00–04:00 and 06:00–10:00 UTC peak
+  windows, and free again after the daily 00:00 UTC reset. OpenCode sessions
+  and the Hermes `model` block move with the route.
+- Fixes the fish config on non-CachyOS systems: removes the missing CachyOS
+  source line and keeps `~/.local/bin` on PATH.
+- Adds Thunar's “Open Terminal Here” action, opening ghostty in the selected
+  folder.
+- Removes Ricelin's upstream Discord special workspace and removes rishot,
+  its config, launcher, desktop entry, Print binds and Hyprland `require`.
 - Restores the executable bit on the wallpaper helpers, fixing SUPER+B.
-- Removes **LightDM**, **Firefox** and **Dolphin**, including their user config.
+- Removes every installed **LightDM** package, file and user, disables the other
+  known display managers, and removes **Firefox** and **Dolphin**, including
+  their user config.
 - Makes Zen the default browser and Thunar the folder handler.
 - Never stops the running graphical session. Reboot to land on SDDM.
+
+## Model routing
+
+The stage installs:
+
+- `~/.local/lib/peakguard.py` — the single schedule and free/paid route.
+- `~/.local/bin/peak-guard` — `status`, `status --json`, `check`, `allow`,
+  `deny`, `record`.
+- `~/.local/bin/ricelin-model-route` + `ricelin-model-route.timer` — applies the
+  route to both tools every minute.
+- `~/.hermes/plugins/peak-guard/` — `pre_llm_call` hard block plus
+  `api_request_error` free-quota tracking.
+- `~/.config/opencode/plugins/peak-guard/` — `model.request` blocks for paid
+  Go and for an exhausted free bucket during peak.
+
+| Condition | OpenCode | Hermes |
+|---|---|---|
+| Free allowance available | `opencode/deepseek-v4.1-flash-free` | free custom endpoint |
+| Free exhausted, off-peak | `opencode-go/deepseek-v4.1-flash` | `opencode-go` |
+| Free exhausted, peak | free (Go denied) | free (Go blocked) |
+
+Peak hours are **01:00–04:00 and 06:00–10:00 UTC, Monday–Friday**. The free
+allowance is shared across free models, keyed by IP, and resets at **00:00
+UTC**. Exhaustion is learned from OpenCode's log and from the
+`peak-guard` Hermes plugin. The router updates non-archived OpenCode sessions,
+the OpenCode default model and its `provider.use` policy, and the Hermes
+`model` block. State is under `~/.local/state/ricelin/model-route/`.
+
+A manual `/model` switch to paid Go during peak is refused by the Hermes
+`pre_llm_call` hook and the OpenCode `model.request` hook, not just by the
+default model. `peak-guard allow 30m` opens a deliberate expiring override;
+`peak-guard deny` closes it. The Chinese public holiday calendar is available
+but **off** by default because OpenCode Go's documented pricing has no holiday
+exception; set `holidays=on` in `~/.config/ricelin/peakguard.conf` to follow
+DeepSeek's own public pricing.
+
+Hermes reaches the free endpoint with the same `OPENCODE_GO_API_KEY` from
+`~/.hermes/.env` and an `opencode/2.2.5` user agent, because the free gateway
+only serves OpenCode clients. If the key is missing, configure it during
+Hermes setup or run the router with paid routing only.
+
+Restart the Hermes gateway once after install so it loads the new `peak-guard`
+plugin.
 
 ## Requirements
 
@@ -80,7 +141,7 @@ start so the privileged phases do not prompt repeatedly.
 
 | Option | Meaning |
 |---|---|
-| `-y`, `--yes` | Run without the confirmation prompt. |
+| `-y`, `--yes` | Run without the installer confirmation prompt. Hermes still runs its own interactive setup wizard. |
 | `--check`, `--status` | Report what is installed. Changes nothing. |
 | `--dry-run` | Run preflight and print the plan. Changes nothing. |
 | `--skip-base` | Never clone or run the upstream Ricelin installer. |
@@ -96,6 +157,8 @@ start so the privileged phases do not prompt repeatedly.
 ```text
 ~/.local/state/ricelin-installer/install-YYYYMMDD-HHMMSS.log
 ```
+
+The log directory is mode `0700` and the log file is mode `0600`.
 
 | Code | Phase |
 |---:|---|

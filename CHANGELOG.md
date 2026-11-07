@@ -41,10 +41,42 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `colors.json`/`hypr-colors.lua` when the palette has not changed.
 - Enables `misc:vrr = 1` in Hyprland so a static desktop can idle below the
   panel's maximum refresh rate.
-- Points Hermes Desktop's Chromium log files at `/dev/null`; the rest of the
-  Hermes log directory is untouched.
-- Masks unused GVFS phone-volume monitors and, when Flatpak is absent, the
-  document/permission portals. `at-spi` stays enabled for accessibility.
+- Points Hermes Desktop's Chromium log files at `/dev/null` and keeps the
+  previous logs beside them as `.pre-ricelin`; the rest of the Hermes log
+  directory is untouched.
+- Feeds the pill's agent line from Hermes and OpenCode as well as Claude Code,
+  and renames the source from "Claude agent" to "AI agent" and the module from
+  "Live activity" to "Activity".
+- Adds a shared `peakguard.py` schedule plus the `peak-guard` CLI
+  (`status`, `status --json`, `check`, `allow`, `deny`, `record`) for the
+  weekday 01:00–04:00 and 06:00–10:00 UTC peak windows. The Chinese holiday
+  calendar is available but off by default because OpenCode Go's documented
+  pricing has no holiday exception.
+- Adds a model router that keeps OpenCode and Hermes on DeepSeek V4.1 Flash:
+  the free OpenCode model first, OpenCode Go only outside peak, and free again
+  after the daily 00:00 UTC reset. It updates non-archived OpenCode sessions,
+  adds a `provider.use` deny policy during peak, and moves the Hermes `model`
+  block.
+- Adds a Hermes `peak-guard` plugin whose `pre_llm_call` hook blocks paid Go
+  during peak before any request, and whose `api_request_error` hook records a
+  free-quota failure so the router can switch providers.
+- Adds an OpenCode `peak-guard` plugin whose `model.request` hooks refuse paid
+  Go during peak and refuse an exhausted free bucket during peak.
+- Fixes the fish config on non-CachyOS systems by removing the missing CachyOS
+  source and keeping `~/.local/bin` on PATH.
+- Adds Thunar's "Open Terminal Here" action, opening ghostty in the selected
+  folder.
+- Removes Ricelin's upstream Discord special workspace.
+- Removes rishot: checkout, config, launcher, desktop entry, Print binds and
+  the Hyprland `require`.
+- Removes every installed LightDM package, file and user, and disables the other
+  known display managers before enabling SDDM.
+- Creates the installer log directory with mode `0700` and the log file with
+  mode `0600`.
+- Writes helper scripts, systemd units and hot-reloaded configuration files
+  atomically.
+- Keeps `nvibrant-bin` installation in the vibrance stage instead of duplicating
+  it in the package stage.
 
 ### Planned
 
