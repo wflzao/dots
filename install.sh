@@ -1088,10 +1088,16 @@ PY
     else
         ui_warn "Model routing: peak-guard, router or plugin missing"
     fi
-    if grep -q 'XCURSOR_SIZE.*12' "$HOME/.config/hypr/modules/env.lua" 2>/dev/null; then
-        ui_ok "Cursor: 12 px"
+    if grep -q 'XCURSOR_SIZE.*12' "$HOME/.config/hypr/modules/env.lua" 2>/dev/null \
+        && grep -q 'XCURSOR_THEME.*Bibata-Modern-Ice' "$HOME/.config/hypr/modules/env.lua" 2>/dev/null; then
+        ui_ok "Cursor: Bibata-Modern-Ice 12 px"
     else
-        ui_warn "Cursor: not 12 px"
+        ui_warn "Cursor: not Bibata-Modern-Ice 12 px"
+    fi
+    if grep -qE 'kb_layout[[:space:]]*=[[:space:]]*"us"' "$HOME/.config/hypr/modules/input.lua" 2>/dev/null; then
+        ui_ok "Keyboard: us"
+    else
+        ui_warn "Keyboard: not us"
     fi
     if grep -q 'mod .. " + SHIFT + Q".*window.kill' "$HOME/.config/hypr/modules/binds.lua" 2>/dev/null; then
         ui_ok "Window binds: SUPER+Q / SUPER+SHIFT+Q"
@@ -6265,16 +6271,16 @@ case "$mode" in
     *) mode=apply ;;
 esac
 
-for f in "$ENVFILE" "$AUTOSTART" "$BINDS"; do
+for f in "$INPUT" "$ENVFILE" "$AUTOSTART" "$BINDS"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
 done
 
-python3 - "$ENVFILE" "$AUTOSTART" "$BINDS" "$mode" "$size" <<'PY'
+python3 - "$INPUT" "$ENVFILE" "$AUTOSTART" "$BINDS" "$mode" "$size" "$CURSOR_THEME" <<'PY'
 import os
 import re
 import sys
 
-envfile, autostart, binds, mode, size = sys.argv[1:6]
+inputfile, envfile, autostart, binds, mode, size, theme = sys.argv[1:8]
 
 
 def save(path, text):
@@ -6295,9 +6301,13 @@ def sub(path, pattern, repl):
         save(path, out)
 
 
+sub(envfile, r'(hl\.env\("XCURSOR_THEME",\s*)"[^"]*"', rf'\g<1>"{theme}"')
 sub(envfile, r'(hl\.env\("XCURSOR_SIZE",\s*)"[^"]*"', rf'\g<1>"{size}"')
 sub(envfile, r'(hl\.env\("HYPRCURSOR_SIZE",\s*)"[^"]*"', rf'\g<1>"{size}"')
 sub(autostart, r'(hyprctl setcursor [^ ]+ )\d+', rf'\g<1>{size}')
+
+if mode == "apply":
+    sub(inputfile, r'(kb_layout\s*=\s*)"[^"]*"', r'\g<1>"us"')
 
 text = open(binds, encoding="utf-8").read()
 if mode == "apply":
@@ -6314,8 +6324,27 @@ save(binds, text)
 PY
 
 if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface cursor-theme "$CURSOR_THEME" 2>/dev/null || true
     gsettings set org.gnome.desktop.interface cursor-size "$size" 2>/dev/null || true
 fi
+
+# GTK reads its own settings.ini (the palette stage writes it earlier), so mirror
+# the same theme and size there for GTK3 and GTK4 apps.
+for ini in "$CONFIG/gtk-3.0/settings.ini" "$CONFIG/gtk-4.0/settings.ini"; do
+    if [ ! -f "$ini" ]; then
+        mkdir -p "$(dirname "$ini")"
+        printf '[Settings]\n' > "$ini"
+    fi
+    for pair in "gtk-cursor-theme-name=$CURSOR_THEME" "gtk-cursor-theme-size=$size"; do
+        key=${pair%%=*}
+        value=${pair#*=}
+        if grep -q "^${key}=" "$ini"; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "$ini"
+        else
+            sed -i "/^\[Settings\]/a ${key}=${value}" "$ini"
+        fi
+    done
+done
 
 if command -v hyprctl >/dev/null 2>&1; then
     hyprctl setcursor "$CURSOR_THEME" "$size" >/dev/null 2>&1 || true
@@ -6325,7 +6354,7 @@ fi
 if [ "$mode" = revert ]; then
     echo "Reverted: cursor 24, SUPER+W close / CTRL+SHIFT+W kill."
 else
-    echo "Applied: cursor 12, SUPER+Q close / SUPER+SHIFT+Q kill."
+    echo "Applied: us keyboard, Bibata-Modern-Ice 12, SUPER+Q close / SUPER+SHIFT+Q kill."
 fi
 )
 

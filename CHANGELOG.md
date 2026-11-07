@@ -83,6 +83,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - The Ricelin base stage now runs `install.sh --sddm` without `--quickstart`,
   so the upstream installer's own wizard asks for the profile, AUR helper,
   GRUB, fish and Brave. `--reinstall-base` still forwards `--reinstall`.
+- Pins the Hyprland keyboard layout to `us` and the cursor to
+  `Bibata-Modern-Ice` at 12 px in `env.lua`, `gsettings` and both GTK
+  `settings.ini` files.
 
 ### Fixed
 
