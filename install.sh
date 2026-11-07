@@ -6427,9 +6427,8 @@ CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 HH="${HERMES_HOME:-$HOME/.hermes}"
 WC="$CFG/hypr/scripts/wallcolors.py"
 PLUGIN="$HH/desktop-plugins/ricelin-desktop/plugin.js"
-UNIT="$CFG/systemd/user"
 
-mkdir -p "$HH/skins" "$HH/desktop-plugins/ricelin-desktop" "$UNIT"
+mkdir -p "$HH/skins" "$HH/desktop-plugins/ricelin-desktop"
 
 cat > "$PLUGIN.tmp" <<'HERMES_PLUGIN_JS'
 /**
@@ -6876,14 +6875,6 @@ print("wallcolors.py: Hermes renderer installed")
 PY
 
 python3 "$prefs"
-
-# Earlier installs used a standalone renderer and a systemd path unit. Remove
-# them; the palette pass now owns the skin.
-systemctl --user disable --now ricelin-hermes-skin.path >/dev/null 2>&1 || true
-systemctl --user disable --now ricelin-hermes-skin.service >/dev/null 2>&1 || true
-rm -f "$UNIT/ricelin-hermes-skin.path" "$UNIT/ricelin-hermes-skin.service"
-rm -f "$CFG/hypr/scripts/ricelin-hermes.py"
-systemctl --user daemon-reload >/dev/null 2>&1 || true
 
 # Apply the current palette now if one is known; the next wallpaper change
 # refreshes it through wallcolors.py.
