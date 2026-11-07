@@ -78,6 +78,25 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Keeps `nvibrant-bin` installation in the vibrance stage instead of duplicating
   it in the package stage.
 
+### Changed
+
+- The Ricelin base stage now runs `install.sh --sddm` without `--quickstart`,
+  so the upstream installer's own wizard asks for the profile, AUR helper,
+  GRUB, fish and Brave. `--reinstall-base` still forwards `--reinstall`.
+
+### Fixed
+
+- `final_render` renders the active wallpaper with its saved per-wallpaper
+  tone, so a normal installer render no longer clears the pinned Dark tone
+  that stage 14 saves for `4.jpg`. The previous revision of the wallcolors
+  patch is migrated in place.
+- Only a real wallpaper switch (the pill or `wallpaper.sh` passing the key)
+  updates the per-wallpaper tone store; plain installer renders leave it alone.
+- The `wallcolors.py` hooks for SDDM, KDE, HyprToolkit, the portal scheme and
+  the Hermes skin are replaced in place and guarded with an exact marker.
+  Re-running the installer no longer moves them, grows blank lines or inserts a
+  second `render_kde`/`render_hermes` definition.
+
 ### Planned
 
 - Clean Arch/CachyOS/EndeavourOS VM test before the first tagged release.

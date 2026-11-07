@@ -11,7 +11,8 @@ re-run safely.
   model, API key, tools, gateway and telemetry choices are made in that wizard;
   the installer does not preselect them.
 - Clones or updates Ricelin in `~/.local/share/ricelin` and runs
-  `install.sh --quickstart --sddm`.
+  `install.sh --sddm`, so the upstream wizard chooses the profile, AUR helper,
+  GRUB, fish and Brave options.
 - Installs and themes SDDM with the palette-driven torii/ricelin theme.
 - Copies the live SUPER+I choices that differ from stock: dynamic palette,
   Sunday week start, and a scheduled 3500 K night light from 19:00 to 06:00

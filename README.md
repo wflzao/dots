@@ -48,8 +48,9 @@ The installer runs six phases:
 1. **Preflight** — distro, privilege method, network, disk, NVIDIA, packages,
    SDDM/theme paths, Dolphin-demo check.
 2. **Base** — clone or update `Gakuseei/Ricelin` in `~/.local/share/ricelin`
-   and run `install.sh --quickstart --sddm`. Skipped when
-   `~/.config/hypr/.ricelin-managed` exists, unless `--reinstall-base`.
+   and run `install.sh --sddm`, which opens the upstream installer's own
+   wizard. Skipped when `~/.config/hypr/.ricelin-managed` exists, unless
+   `--reinstall-base`.
 3. **Packages** — SDDM, Thunar stack, greeter tools, `nvidia-settings`, Zen
    and OpenCode; bootstraps `yay`/`paru` when needed. `nvibrant-bin` is
    installed by the vibrance stage. Hermes Agent and Hermes Desktop are

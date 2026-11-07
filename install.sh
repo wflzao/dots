@@ -7,8 +7,9 @@
 #   1. Preflight: Arch-family check, root method, network, disk, NVIDIA,
 #      packages, SDDM/theme paths and a Dolphin-demo warning.
 #   2. Ricelin base: clone/update https://github.com/Gakuseei/Ricelin and run
-#      its installer with --quickstart --sddm. Skipped when the managed marker
-#      already exists unless --reinstall-base is given.
+#      its installer with --sddm so its own wizard chooses the profile and
+#      options. Skipped when the managed marker already exists unless
+#      --reinstall-base is given.
 #   3. Extra packages: SDDM, the Thunar stack, the greeter's xrandr/xrdb,
 #      nvidia-settings, Zen and OpenCode. nvibrant-bin is installed by the
 #      vibrance stage. AUR packages go through yay/paru; yay is bootstrapped if
@@ -188,7 +189,7 @@ fail_step() {
     case "$label" in
         *"Ricelin base"*)
             code=21
-            hint="Check the clone at $RICELIN_DIR and run its installer by hand: sh \"$RICELIN_DIR/install.sh\" --quickstart --sddm" ;;
+            hint="Check the clone at $RICELIN_DIR and run its installer by hand: sh \"$RICELIN_DIR/install.sh\" --sddm" ;;
         *"Packages"*)
             code=22
             hint="Check pacman/yay and the network, then re-run. This step installs zen-browser-bin; nvibrant-bin is installed by the vibrance step." ;;
@@ -393,7 +394,7 @@ preflight() {
         pf_ok "Ricelin base: installed (managed marker found)"
     else
         BASE_MANAGED=0
-        pf_warn "Ricelin base: not installed; the installer will clone it and run install.sh --quickstart --sddm."
+        pf_warn "Ricelin base: not installed; the installer will clone it and run install.sh --sddm (wizard)."
     fi
 
     detect_network
@@ -474,7 +475,10 @@ bootstrap_ricelin() {
         run_quiet "clone Ricelin" git clone --depth 1 "$REPO_URL" "$RICELIN_DIR" || return 1
     fi
 
-    local -a args=(--quickstart --sddm)
+    # No --quickstart: upstream must run its own wizard and ask for the profile,
+    # AUR helper, GRUB, fish and Brave. --sddm only preselects the torii theme.
+    # The wizard reads keys from /dev/tty, so it still works under run_quiet.
+    local -a args=(--sddm)
     [ "$REINSTALL_BASE" = 1 ] && args=(--reinstall "${args[@]}")
     run_quiet "run Ricelin installer" sh "$RICELIN_DIR/install.sh" "${args[@]}" || return 1
     [ -f "$HOME/.config/hypr/.ricelin-managed" ]
@@ -625,10 +629,32 @@ apply_logout() {
 }
 
 final_render() {
-    local wall
+    local wall tone before flags store rc=0
     wall=$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)
     if [ -n "$wall" ] && [ -f "$wall" ]; then
-        python3 "$HOME/.config/hypr/scripts/wallcolors.py" "$wall" "$wall" || return 1
+        # Render the active wallpaper with its own saved tone, the same way
+        # wallpaper.sh does. Without this, a render while the global pick is
+        # Auto clears the pinned tone that stage_wallpapers just saved for
+        # 4.jpg (remember_tone treats Auto as "no entry").
+        flags="$HOME/.local/state/ricelin/flags.json"
+        store="$HOME/.local/state/ricelin/wallpaper-tone.json"
+        before=$(jq -r '.paletteTone // "auto"' "$flags" 2>/dev/null || echo auto)
+        tone=$(jq -r --arg p "$wall" '.[$p] // "auto"' "$store" 2>/dev/null || echo auto)
+        [ -n "$tone" ] || tone=auto
+        if [ "$tone" != "$before" ] \
+            && jq --indent 4 --arg t "$tone" '.paletteTone = $t' "$flags" > "$flags.tmp" 2>/dev/null; then
+            mv "$flags.tmp" "$flags"
+        else
+            rm -f "$flags.tmp"
+        fi
+        python3 "$HOME/.config/hypr/scripts/wallcolors.py" "$wall" "$wall" || rc=1
+        if [ "$tone" != "$before" ] \
+            && jq --indent 4 --arg t "$before" '.paletteTone = $t' "$flags" > "$flags.tmp" 2>/dev/null; then
+            mv "$flags.tmp" "$flags"
+        else
+            rm -f "$flags.tmp"
+        fi
+        [ "$rc" = 0 ] || return 1
     fi
     if command -v hyprctl >/dev/null 2>&1; then
         hyprctl reload >/dev/null 2>&1 || true
@@ -1187,7 +1213,7 @@ main() {
     elif [ "$BASE_MANAGED" = 1 ] && [ "$REINSTALL_BASE" = 0 ]; then
         skip_step "Ricelin base" "already installed; use --reinstall-base to force"
     else
-        run_step "Ricelin base (clone/update + install.sh --quickstart --sddm)" bootstrap_ricelin
+        run_step "Ricelin base (clone/update + installer wizard)" bootstrap_ricelin
     fi
     run_step "Packages (Thunar stack, greeter tools, Zen, OpenCode)" install_packages
     run_step_stream "Hermes Agent + Desktop" install_hermes
@@ -2115,17 +2141,24 @@ text = open(wc, encoding="utf-8").read()
 original = text
 if apply:
     start = text.find("# ricelin-kde-palette\n")
+    replaced = False
     if start != -1:
         endmark = text.find("# ricelin-kde-palette-end\n", start)
-        if endmark == -1:
-            endmark = text.find("\ndef publish(", start)
-        else:
-            endmark += len("# ricelin-kde-palette-end\n")
         if endmark != -1:
-            text = text[:start] + text[endmark:]
-    if "\ndef publish(" not in text:
-        sys.exit("wallcolors.py did not match the expected layout")
-    text = text.replace("\ndef publish(", "\n\n" + KDE_HELPER + "def publish(", 1)
+            endmark += len("# ricelin-kde-palette-end\n")
+            # Replace in place so the block keeps its position relative to the
+            # other hooks; reinserting before def publish moved it every run.
+            text = (text[:start].rstrip("\n") + "\n\n" + KDE_HELPER
+                    + text[endmark:].lstrip("\n"))
+            replaced = True
+        else:
+            endmark = text.find("\ndef publish(", start)
+            if endmark != -1:
+                text = text[:start] + text[endmark:]
+    if not replaced:
+        if "\ndef publish(" not in text:
+            sys.exit("wallcolors.py did not match the expected layout")
+        text = text.replace("\ndef publish(", "\n\n" + KDE_HELPER + "def publish(", 1)
     if "# ricelin-kde-palette\n" not in text:
         sys.exit("could not install the KDE renderer")
     if "    render_kde(pill)\n" not in text:
@@ -3407,6 +3440,15 @@ WC_MAIN_OLD = '''    feat = cached_analyze(wallpaper) or NEUTRAL
     return publish(palette(feat, vibrancy=vibrancy()), seed(feat))
 '''
 WC_MAIN_NEW = '''    feat = cached_analyze(wallpaper) or NEUTRAL
+    # ricelin-wallpaper-tone: only a wallpaper switch (the pill and
+    # wallpaper.sh pass the key) updates the store. A plain installer render
+    # must not clear the pinned tone with the global Auto value.
+    if len(sys.argv) > 2:
+        remember_tone(sys.argv[2], palette_tone())
+    return publish(palette(feat, palette_light(), vibrancy=vibrancy()), seed(feat))
+'''
+
+WC_MAIN_PREV = '''    feat = cached_analyze(wallpaper) or NEUTRAL
     # ricelin-wallpaper-tone
     key = sys.argv[2] if len(sys.argv) > 2 else wallpaper
     remember_tone(key, palette_tone())
@@ -3425,8 +3467,17 @@ WC_CACHE_NEW = '''    result = analyze(wallpaper)
 '''
 
 if mode == "apply":
+    # Forward-migrate the previous revision of this patch: it remembered the
+    # global tone on every render, so a re-run would otherwise fail to find the
+    # original anchor.
+    with open(wc, encoding="utf-8") as fh:
+        current = fh.read()
+    if WC_MAIN_PREV in current:
+        with open(wc, "w", encoding="utf-8") as fh:
+            fh.write(current.replace(WC_MAIN_PREV, WC_MAIN_NEW, 1))
+        print("apply: wallcolors.py call (migrated)")
     edit(wc, WC_ANCHOR, WC_ANCHOR + "\n" + WC_HELPER, "wallcolors.py helper", "def remember_tone")
-    edit(wc, WC_MAIN_OLD, WC_MAIN_NEW, "wallcolors.py call", "remember_tone(key, palette_tone())")
+    edit(wc, WC_MAIN_OLD, WC_MAIN_NEW, "wallcolors.py call", "if len(sys.argv) > 2:")
     edit(wc, WC_CACHE_OLD, WC_CACHE_NEW, "wallcolors.py cache prune", "seen.items() if os.path.isfile(k)")
     edit(wc, '    return flags().get("paletteTone", "dark")',
          '    return flags().get("paletteTone", "auto")',
@@ -5264,10 +5315,14 @@ if end != -1:
 else:
     end = text.find("\ndef publish(", start)
 if start != -1 and end != -1:
-    text = text[:start] + text[end:]
-if "\ndef publish(" not in text:
-    sys.exit("wallcolors.py did not match the expected layout")
-text = text.replace("\ndef publish(", "\n\n" + func + "def publish(", 1)
+    # Replace the block where it already sits, so a re-run does not move it
+    # past the other hooks (thunar/KDE) that were inserted later. Keep exactly
+    # one blank line of separation.
+    text = text[:start].rstrip("\n") + "\n\n" + func + text[end:].lstrip("\n")
+else:
+    if "\ndef publish(" not in text:
+        sys.exit("wallcolors.py did not match the expected layout")
+    text = text.replace("\ndef publish(", "\n\n" + func + "def publish(", 1)
 if "    render_sddm(pill)\n" not in text:
     text = text.replace("    render_fastfetch(pill)\n",
                         "    render_fastfetch(pill)\n    render_sddm(pill)\n", 1)
@@ -6345,11 +6400,12 @@ if start != -1:
     if end == -1:
         sys.exit("hyprtoolkit palette block is not terminated")
     end += len("# ricelin-hyprtoolkit-palette-end\n")
-    text = text[:start] + text[end:]
-
-if "\ndef publish(" not in text:
-    sys.exit("wallcolors.py did not match the expected layout")
-text = text.replace("\ndef publish(", "\n\n" + func + "def publish(", 1)
+    # Replace in place so a re-run does not move the block or add blank lines.
+    text = text[:start].rstrip("\n") + "\n\n" + func + text[end:].lstrip("\n")
+else:
+    if "\ndef publish(" not in text:
+        sys.exit("wallcolors.py did not match the expected layout")
+    text = text.replace("\ndef publish(", "\n\n" + func + "def publish(", 1)
 
 if "    render_hyprtoolkit(pill)\n" not in text:
     text = text.replace("    render_kde(pill)\n",
@@ -7097,21 +7153,34 @@ for path in changed:
 HERMES_PREFS_PY
 
 python3 - "$WC" "$render" <<'PY'
+import ast
 import os
 import re
 import sys
 
 path, blockfile = sys.argv[1], sys.argv[2]
 src = open(path, encoding="utf-8").read()
-block = open(blockfile, encoding="utf-8").read().rstrip() + "\n\n\n"
+block = open(blockfile, encoding="utf-8").read().rstrip() + "\n\n"
 original = src
 
 start = src.find("def render_hermes(pill):")
 if start != -1:
-    end = src.find("\ndef ", start + 1)
-    if end == -1:
-        sys.exit("wallcolors.py: render_hermes() block is unbalanced")
-    src = src[:start] + block + src[end + 1:]
+    # Use the AST to find the function's real end. The function contains a
+    # triple-quoted CSS template with column-0 lines, so indentation scanning is
+    # not reliable, and stopping at the next "def " used to swallow the comment
+    # markers that other stages place after it.
+    try:
+        tree = ast.parse(src)
+        end_line = next(
+            node.end_lineno
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "render_hermes"
+        )
+    except (SyntaxError, StopIteration):
+        sys.exit("wallcolors.py: could not locate render_hermes()")
+    end = sum(len(line) for line in src.splitlines(keepends=True)[:end_line])
+    src = src[:start] + block + src[end:].lstrip("\n")
 else:
     anchor = "def publish(pill, source_hex):"
     if anchor not in src:
@@ -10340,7 +10409,7 @@ import sys
 
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-marker = "# ricelin-portal-scheme\n"
+marker = "# ricelin-portal-scheme:"
 call = '''    # ricelin-portal-scheme: Firefox/Zen and Electron apps follow this portal key live.
     try:
         subprocess.run(["gsettings", "set", "org.x.apps.portal", "color-scheme", scheme],

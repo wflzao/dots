@@ -53,8 +53,12 @@ full output to the terminal as well.
   hand:
 
   ```sh
-  sh ~/.local/share/ricelin/install.sh --quickstart --sddm
+  sh ~/.local/share/ricelin/install.sh --sddm
   ```
+
+  The upstream wizard runs in the terminal. If there is no controlling
+  terminal (for example a cron job), pass `--quickstart` yourself to accept the
+  Quick-profile defaults.
 
 - Check for a stale pacman lock: `ls /var/lib/pacman/db.lck`.
 - Refresh mirrors and retry: `sudo pacman -Syu`.
