@@ -1712,7 +1712,11 @@ EOF
 
 wall=$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)
 if [ -n "$wall" ] && [ -f "$HOME/.config/hypr/scripts/wallcolors.py" ]; then
-    python3 "$HOME/.config/hypr/scripts/wallcolors.py" "$wall" >/dev/null 2>&1 || true
+    # Pass a key that is not a wallpaper: a plain render must not rewrite the
+    # per-wallpaper tone store (the previous patch revision would treat the
+    # global Auto value as an explicit pick and clear 4.jpg's Dark entry).
+    python3 "$HOME/.config/hypr/scripts/wallcolors.py" "$wall" \
+        "$HOME/.local/state/ricelin/wallpaper-tone.noop" >/dev/null 2>&1 || true
     echo "Refreshed the GTK palette from $wall"
 fi
 
@@ -1757,7 +1761,9 @@ vibrancy() {
 reload_all() {
     wall=$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)
     if [ -n "$wall" ] && [ -f "$wall" ]; then
-        python3 "$wc" "$wall"
+        # Same as the Zen stage: do not let a plain render touch the
+        # per-wallpaper tone store.
+        python3 "$wc" "$wall" "$HOME/.local/state/ricelin/wallpaper-tone.noop"
     fi
     hyprctl reload >/dev/null 2>&1 || true
     # Ghostty reloads its config, including the generated colours, on SIGUSR2.
@@ -7214,7 +7220,9 @@ python3 "$prefs"
 # refreshes it through wallcolors.py.
 wall=$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)
 if [ -n "$wall" ] && [ -f "$wall" ]; then
-    python3 "$WC" "$wall" >/dev/null 2>&1 || true
+    # Render without letting the per-wallpaper tone store see a plain Auto
+    # render; pass a key that is not a wallpaper.
+    python3 "$WC" "$wall" "$HOME/.local/state/ricelin/wallpaper-tone.noop" >/dev/null 2>&1 || true
 fi
 
 python3 -m py_compile "$WC"

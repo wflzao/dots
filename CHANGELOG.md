@@ -92,6 +92,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
   patch is migrated in place.
 - Only a real wallpaper switch (the pill or `wallpaper.sh` passing the key)
   updates the per-wallpaper tone store; plain installer renders leave it alone.
+  The Zen, Hermes and one-tone stages now pass a non-wallpaper key so even the
+  first re-run cannot clear `4.jpg`'s pinned tone before the patch migration.
 - The `wallcolors.py` hooks for SDDM, KDE, HyprToolkit, the portal scheme and
   the Hermes skin are replaced in place and guarded with an exact marker.
   Re-running the installer no longer moves them, grows blank lines or inserts a
