@@ -64,7 +64,7 @@ NO_NVIDIA=0
 VERBOSE=0
 
 STEP=0
-TOTAL=36
+TOTAL=37
 PF_FAIL=0
 PF_WARN=0
 PF_CODE=10
@@ -1123,6 +1123,7 @@ main() {
     run_step "Wallpaper folder in .config" stage_wallpaper_dir
     run_step "Wallpaper set + 4.jpg default" stage_wallpapers
     run_step "SUPER+I personal settings" stage_personal_settings
+    run_step "Hermes desktop skin" stage_hermes_skin
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
@@ -6212,6 +6213,82 @@ chmod 0644 "$tmp"
 mv "$tmp" "$FLAGS"
 
 echo "SUPER+I: dynamic palette, Sunday week start, scheduled 19:00-06:00 night light."
+)
+
+# ---------------------------------------------------------------- stage_hermes_skin
+stage_hermes_skin() (
+# Render the Ricelin palette into a Hermes skin for the default desktop view.
+# HUD and Quick Entry are intentionally not themed: the generated CSS is
+# scoped to roots without their window markers. A systemd path unit re-renders
+# the skin when the wallpaper palette changes, and the skin is selected for the
+# next desktop launch.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+HH="${HERMES_HOME:-$HOME/.hermes}"
+SCRIPT="$CFG/hypr/scripts/ricelin-hermes.py"
+UNIT="$CFG/systemd/user"
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+RAW="https://raw.githubusercontent.com/wflzao/dots/main/integrations/hermes/ricelin-hermes.py"
+
+mkdir -p "$CFG/hypr/scripts" "$UNIT" "$HH/skins"
+
+if [ -n "$HERE" ] && [ -s "$HERE/integrations/hermes/ricelin-hermes.py" ]; then
+    install -m 0755 "$HERE/integrations/hermes/ricelin-hermes.py" "$SCRIPT"
+else
+    command -v curl >/dev/null 2>&1 || {
+        echo "curl is required to install the Hermes skin renderer." >&2
+        exit 1
+    }
+    tmp="$SCRIPT.tmp"
+    curl -fsSL --retry 3 --connect-timeout 15 "$RAW" -o "$tmp" || {
+        rm -f "$tmp"
+        echo "Could not download the Hermes skin renderer." >&2
+        exit 1
+    }
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$SCRIPT"
+fi
+
+cat > "$UNIT/ricelin-hermes-skin.service" <<'EOF'
+[Unit]
+Description=Render the Ricelin Hermes desktop skin from the wallpaper palette
+Documentation=file:%h/.config/hypr/scripts/ricelin-hermes.py
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 %h/.config/hypr/scripts/ricelin-hermes.py
+RemainAfterExit=no
+EOF
+
+cat > "$UNIT/ricelin-hermes-skin.path" <<'EOF'
+[Unit]
+Description=Watch the Ricelin palette and re-render the Hermes desktop skin
+
+[Path]
+PathChanged=%h/.cache/ricelin/colors.json
+Unit=ricelin-hermes-skin.service
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+systemctl --user enable --now ricelin-hermes-skin.path >/dev/null 2>&1 || true
+
+python3 "$SCRIPT"
+
+if [ -x "$HOME/.local/bin/hermes" ]; then
+    if "$HOME/.local/bin/hermes" config set display.skin ricelin >/dev/null 2>&1; then
+        echo "Hermes desktop skin: ricelin"
+    else
+        echo "Hermes desktop skin: rendered; could not select it in Hermes" >&2
+    fi
+else
+    echo "Hermes desktop skin: rendered; Hermes is not installed yet"
+fi
 )
 
 stage_nightlight_ramp() (

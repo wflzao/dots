@@ -64,12 +64,12 @@ The installer runs six phases:
    wallpaper set (`1.png`, `2.jpg`, `3.png`, `4.jpg`) in
    `~/.config/ricelin/wallpapers` with
    `4.jpg` as the default with its matugen tone pinned to Dark while the
-   others stay on Auto, native resolution at the highest refresh,
-   KDE/fish and terminal palette, portal colour-scheme sync, Zen colours,
-   Thunar, polkit, night-light cursor, wallpaper tone, wallpaper-strip
-   centring, lock-screen palette, settings zoom, atomic theme writes, menus,
-   app glass, game-mode opacity, screenshots, UI tweaks, smooth clipboard
-   scrolling, logout.
+   others stay on Auto, native resolution at the highest refresh, the generated
+   Ricelin skin for the Hermes Desktop default window, KDE/fish and terminal
+   palette, portal colour-scheme sync, Zen colours, Thunar, polkit, night-light
+   cursor, wallpaper tone, wallpaper-strip centring, lock-screen palette,
+   settings zoom, atomic theme writes, menus, app glass, game-mode opacity,
+   screenshots, UI tweaks, smooth clipboard scrolling, logout.
 6. **Verification** — final palette render and blocking-item report.
 
 The installer removes **LightDM**, **Firefox** and **Dolphin**, including their

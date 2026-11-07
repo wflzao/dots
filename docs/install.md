@@ -16,6 +16,8 @@ re-run safely.
 - Copies the live SUPER+I choices that differ from stock: dynamic palette,
   Sunday week start, and a scheduled 3500 K night light from 19:00 to 06:00
   that fades in and out over 5 minutes.
+- Generates a Ricelin skin for the Hermes Desktop default window and re-renders
+  it when the wallpaper palette changes. HUD and Quick Entry are not themed.
 - Moves wallpapers from `~/Ricelin/wallpapers` to
   `~/.config/ricelin/wallpapers`, updates the saved paths, installs the bundled
   `1.png`, `2.jpg`, `3.png` and `4.jpg` set, and makes `4.jpg` the default with
