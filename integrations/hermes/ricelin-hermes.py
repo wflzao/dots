@@ -87,6 +87,14 @@ CSS = """:root:not([data-hud-window]):not([data-quick-entry-window]) {
   --dt-user-bubble: color-mix(in srgb, var(--ricelin-primary) 12%, var(--ricelin-surface-container));
   --dt-user-bubble-border: color-mix(in srgb, var(--ricelin-primary) 22%, transparent);
 }
+
+/* The send / start-voice CTA is the system accent, not a foreground-black
+   circle. The source class list is corrected too; this keeps the skin correct
+   if a future desktop build ships the upstream foreground classes again. */
+:root:not([data-hud-window]):not([data-quick-entry-window]) [data-slot='composer-root'] button[class*='bg-foreground'] {
+  background-color: var(--ricelin-primary) !important;
+  color: #fff !important;
+}
 """
 
 
