@@ -32,6 +32,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   clear selection highlight; fixes KDE selection text and active colours.
 - Removes clipboard-history row snapping so wheel scrolling is continuous.
 - Adds wallpaper-strip centring and the palette-aware lock-screen scrim.
+- Caches matugen palette lookups per tone so one wallpaper render spawns
+  matugen once per mode instead of once per caller, and skips rewriting
+  `colors.json`/`hypr-colors.lua` when the palette has not changed.
+- Enables `misc:vrr = 1` in Hyprland so a static desktop can idle below the
+  panel's maximum refresh rate.
+- Points Hermes Desktop's Chromium log files at `/dev/null`; the rest of the
+  Hermes log directory is untouched.
+- Masks unused GVFS phone-volume monitors and, when Flatpak is absent, the
+  document/permission portals. `at-spi` stays enabled for accessibility.
 
 ### Planned
 

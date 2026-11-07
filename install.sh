@@ -64,7 +64,7 @@ NO_NVIDIA=0
 VERBOSE=0
 
 STEP=0
-TOTAL=37
+TOTAL=41
 PF_FAIL=0
 PF_WARN=0
 PF_CODE=10
@@ -1124,6 +1124,7 @@ main() {
     run_step "Wallpaper set + 4.jpg default" stage_wallpapers
     run_step "SUPER+I personal settings" stage_personal_settings
     run_step "Hermes desktop integration" stage_hermes_skin
+    run_step "Hermes desktop log quieting" stage_hermes_logs
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
@@ -1138,9 +1139,12 @@ main() {
     run_step "Lock screen palette" stage_lock_theme
     run_step "Settings zoom" stage_settings_zoom
     run_step "Atomic theme writes" stage_atomic_theme_write
+    run_step "Wallcolors render cache" stage_wallcolors_cache
     run_step "Pretty menus" stage_pretty_menus
     run_step "App glass" stage_app_glass
+    run_step "VRR / adaptive refresh" stage_hypr_vrr
     run_step "Game-mode opacity" stage_gamemode_opaque
+    run_step "Trim unused background services" stage_background_services
 
     # 5. Desktop behaviour.
     run_step "Screenshot binds + hyprshot" apply_screenshots
@@ -3699,6 +3703,103 @@ rmdir "$(dirname "$SCRIPT")/__pycache__" 2>/dev/null || true
 rm -f "$(dirname "$SCRIPT")"/wallcolors.py.tmp 2>/dev/null || true
 )
 
+# ---------------------------------------------------------------- stage_wallcolors_cache
+stage_wallcolors_cache() (
+# Cache and de-duplicate wallcolors palette work.
+#
+# wallcolors.py calls matugen() several times per run (surface palette, dark and
+# light base16, the terminal wheel). Each call spawns matugen and parses JSON.
+# The result for a given source hex and mode is pure, so a small LRU keeps a
+# palette render to one subprocess per mode instead of one per caller.
+#
+# The same render also rewrites colors.json and hypr-colors.lua even when the
+# palette has not changed. write_if_changed skips the disk write, and the live
+# Hyprland border push, when the bytes are identical.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+WC="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/scripts/wallcolors.py"
+[ -f "$WC" ] || { echo "wallcolors.py not found at $WC" >&2; exit 1; }
+
+python3 - "$WC" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+original = src
+
+if not re.search(r"(?m)^import functools\b", src):
+    match = re.search(r"(?m)^import fcntl\b", src)
+    if match:
+        src = src[:match.end()] + "\nimport functools" + src[match.end():]
+    else:
+        match = re.search(r"(?m)^import [^\n]+\n", src)
+        if not match:
+            sys.exit("wallcolors.py: no import block to extend")
+        src = src[:match.end()] + "import functools\n" + src[match.end():]
+
+if not re.search(r"@functools\.lru_cache\([^)]*\)\s*\ndef matugen\(", src):
+    if not re.search(r"(?m)^def matugen\(", src):
+        sys.exit("wallcolors.py: matugen() is missing")
+    src = re.sub(r"(?m)^def matugen\(", "@functools.lru_cache(maxsize=8)\ndef matugen(", src, count=1)
+
+COLORS_OLD = r'''    (CACHE / "colors.json").write_text(json.dumps(pill, indent=2) + "\n")
+'''
+COLORS_NEW = r'''    write_if_changed(CACHE / "colors.json", json.dumps(pill, indent=2) + "\n")
+'''
+
+HYPR_OLD = r'''    (CACHE / "hypr-colors.lua").write_text(
+        'return {\n    active = "%s",\n    inactive = "%s",\n}\n'
+        % (pill["primary"], b["base01"]))
+    # Pushed live because hyprctl reload drops game mode and stalls for about a second.
+    try:
+        subprocess.run(["hyprctl", "eval", 'hl.config({ general = { ["col.active_border"] = "rgb(%s)", '
+                        '["col.inactive_border"] = "rgb(%s)" } })' % (pill["primary"][1:], b["base01"][1:])],
+                       capture_output=True)
+    except OSError:
+        pass
+'''
+HYPR_NEW = r'''    borders = (
+        'return {\n    active = "%s",\n    inactive = "%s",\n}\n'
+        % (pill["primary"], b["base01"]))
+    if write_if_changed(CACHE / "hypr-colors.lua", borders):
+        # Pushed live because hyprctl reload drops game mode and stalls for about a second.
+        try:
+            subprocess.run(["hyprctl", "eval", 'hl.config({ general = { ["col.active_border"] = "rgb(%s)", '
+                            '["col.inactive_border"] = "rgb(%s)" } })' % (pill["primary"][1:], b["base01"][1:])],
+                           capture_output=True)
+        except OSError:
+            pass
+'''
+
+if COLORS_OLD in src:
+    src = src.replace(COLORS_OLD, COLORS_NEW, 1)
+elif COLORS_NEW not in src:
+    sys.exit("wallcolors.py: colors.json write anchor is missing")
+
+if HYPR_OLD in src:
+    src = src.replace(HYPR_OLD, HYPR_NEW, 1)
+elif HYPR_NEW not in src:
+    sys.exit("wallcolors.py: hypr-colors write anchor is missing")
+
+if src == original:
+    print("wallcolors.py: render cache already present")
+    sys.exit(0)
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write(src)
+os.replace(tmp, path)
+print("wallcolors.py: render cache installed")
+PY
+
+python3 -m py_compile "$WC"
+rm -f "$(dirname "$WC")/__pycache__/wallcolors."*.pyc
+rmdir "$(dirname "$WC")/__pycache__" 2>/dev/null || true
+)
+
 # ---------------------------------------------------------------- stage_pretty_menus
 stage_pretty_menus() (
 # Make right-click menus look like the rest of the desktop.
@@ -3938,6 +4039,63 @@ if command -v hyprctl >/dev/null 2>&1; then
 fi
 
 echo "Menus: popup blur on, GTK3/GTK4 follow the palette, document font is Inter."
+)
+
+# ---------------------------------------------------------------- stage_hypr_vrr
+stage_hypr_vrr() (
+# Let the compositor idle below the panel's maximum refresh while static.
+#
+# `misc:vrr = 1` keeps variable refresh on, so a desktop with no motion can drop
+# its scan rate; animations still present every frame. This is a Hyprland
+# setting, not a monitor setting, and Hyprland reloads it live.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+DECOR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/modules/decoration.lua"
+[ -f "$DECOR" ] || { echo "decoration.lua not found at $DECOR" >&2; exit 1; }
+
+python3 - "$DECOR" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+match = re.search(r"\bmisc\s*=\s*\{", src)
+if not match:
+    sys.exit("decoration.lua: misc table is missing")
+
+start = match.end()
+depth = 1
+i = start
+while i < len(src) and depth:
+    if src[i] == "{":
+        depth += 1
+    elif src[i] == "}":
+        depth -= 1
+    i += 1
+if depth:
+    sys.exit("decoration.lua: misc table is unbalanced")
+
+body = src[start:i - 1]
+if re.search(r"(?m)^\s*vrr\s*=", body):
+    new_body = re.sub(r"(?m)^(\s*)vrr\s*=\s*[^,\n]+", r"\1vrr = 1", body, count=1)
+else:
+    new_body = "\n        vrr = 1," + body
+updated = src[:start] + new_body + src[i - 1:]
+
+if updated == src:
+    print("decoration.lua: misc:vrr already 1")
+    sys.exit(0)
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write(updated)
+os.replace(tmp, path)
+print("decoration.lua: misc:vrr = 1")
+PY
+
+hyprctl reload >/dev/null 2>&1 || true
 )
 
 # ---------------------------------------------------------------- stage_app_glass
@@ -5214,6 +5372,39 @@ fi
 echo "Run the user phase as your desktop user: sh $self --user"
 )
 
+# ---------------------------------------------------------------- stage_background_services
+stage_background_services() (
+# Mask unused background portals and phone-volume monitors.
+#
+# gvfs starts one D-Bus service per device class (AFC/iPhone, gphoto2/camera,
+# MTP/Android) even when no such device is attached. The Flatpak document and
+# permission portals are always-on D-Bus activation too; this installer does
+# not install Flatpak, so mask them only when no Flatpak binary is present.
+# at-spi stays enabled: accessibility tools and some toolkits need it.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+systemctl --user show-environment >/dev/null 2>&1 || {
+    echo "no user systemd session; skipping"
+    exit 0
+}
+
+units="gvfs-afc-volume-monitor.service gvfs-gphoto2-volume-monitor.service gvfs-mtp-volume-monitor.service"
+if ! command -v flatpak >/dev/null 2>&1; then
+    units="$units xdg-document-portal.service xdg-permission-store.service"
+fi
+
+for unit in $units; do
+    if ! systemctl --user list-unit-files --no-legend "$unit" 2>/dev/null | grep -q "^$unit"; then
+        continue
+    fi
+    systemctl --user stop "$unit" >/dev/null 2>&1 || true
+    systemctl --user mask "$unit" >/dev/null 2>&1 || true
+done
+
+echo "Masked unused GVFS/portal services (at-spi left enabled)"
+)
+
 # ---------------------------------------------------------------- stage_screenshot_binds
 stage_screenshot_binds() (
 # Add the two screenshot keybinds and install hyprshot.
@@ -6311,6 +6502,32 @@ if [ -x "$HOME/.local/bin/hermes" ]; then
 else
     echo "Hermes desktop: rendered; Hermes is not installed yet"
 fi
+)
+
+# ---------------------------------------------------------------- stage_hermes_logs
+stage_hermes_logs() (
+# Keep Hermes's per-window Chromium logs off the disk.
+#
+# The desktop opens desktop.log and desktop-chromium.log and writes to them
+# continuously while it runs. They are diagnostic only; point these two at
+# /dev/null so the renderer does not pay for disk writes during normal use.
+# The rest of ~/.hermes/logs is untouched.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+HH="${HERMES_HOME:-$HOME/.hermes}"
+LOGS="$HH/logs"
+[ -d "$LOGS" ] || { echo "Hermes logs not present yet; skipping"; exit 0; }
+
+for name in desktop.log desktop-chromium.log; do
+    path="$LOGS/$name"
+    if [ -L "$path" ] && [ "$(readlink -f "$path")" = /dev/null ]; then
+        continue
+    fi
+    rm -f "$path"
+    ln -s /dev/null "$path"
+done
+echo "Hermes desktop logs: desktop.log + desktop-chromium.log -> /dev/null (restart Hermes to detach old handles)"
 )
 
 stage_nightlight_ramp() (
