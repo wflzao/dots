@@ -86,6 +86,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Pins the Hyprland keyboard layout to `us` and the cursor to
   `Bibata-Modern-Ice` at 12 px in `env.lua`, `gsettings` and both GTK
   `settings.ini` files.
+- Seeds `4.jpg` as Dark only on the first install, guarded by
+  `~/.local/state/ricelin/wallpaper-tone-seeded`. A later Auto or Light choice
+  is preserved across installer re-runs; verification accepts any valid
+  per-wallpaper tone instead of insisting on Dark.
 
 ### Fixed
 

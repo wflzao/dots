@@ -881,14 +881,13 @@ verify_report() {
         [ -s "$HOME/.config/ricelin/wallpapers/$name" ] || wallpapers_ok=0
     done
     if [ -f "$HOME/.local/state/ricelin/wallpaper-tone.json" ]; then
-        jq -e --arg p "$HOME/.config/ricelin/wallpapers/4.jpg" '.[$p] == "dark"' \
+        jq -e --arg p "$HOME/.config/ricelin/wallpapers/4.jpg" \
+            '.[$p] == null or .[$p] == "dark" or .[$p] == "light"' \
             "$HOME/.local/state/ricelin/wallpaper-tone.json" >/dev/null 2>&1 || tones_ok=0
         for name in 1.png 2.jpg 3.png; do
             jq -e --arg p "$HOME/.config/ricelin/wallpapers/$name" 'has($p) | not' \
                 "$HOME/.local/state/ricelin/wallpaper-tone.json" >/dev/null 2>&1 || tones_ok=0
         done
-    else
-        tones_ok=0
     fi
     if [ -x "$HOME/.config/hypr/scripts/wallpaper.sh" ] \
         && [ -d "$HOME/.config/ricelin/wallpapers" ] \
@@ -898,7 +897,7 @@ verify_report() {
         && [ "$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)" = "$HOME/.config/ricelin/wallpapers/4.jpg" ] \
         && jq -e --arg dir "$HOME/.config/ricelin/wallpapers" '.wallpaperDir == $dir' \
             "$HOME/.local/state/ricelin/flags.json" >/dev/null 2>&1; then
-        ui_ok "Wallpapers: bundled set; 4.jpg default and dark; others auto"
+        ui_ok "Wallpapers: bundled set; 4.jpg default; tones follow the per-wallpaper choice"
     else
         ui_warn "Wallpapers: set, 4.jpg default/tone or other tones incomplete"
     fi
@@ -6670,33 +6669,35 @@ done
     exit 1
 }
 
-# Make 4.jpg the live wallpaper and pin only its matugen tone to dark.
+# Make 4.jpg the live wallpaper. On the first install seed its per-wallpaper
+# tone to Dark; after that the store belongs to the user, so a later run must
+# not turn an Auto or Light choice back into Dark.
 [ -s "$FLAGS" ] || printf '{}\n' > "$FLAGS"
 tmp=$(mktemp "$FLAGS.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
-jq --arg dir "$WALLDIR" '.wallpaperDir = $dir | .paletteTone = "auto"' "$FLAGS" > "$tmp"
+jq --arg dir "$WALLDIR" '
+    .wallpaperDir = $dir
+    | if has("paletteTone") then . else .paletteTone = "auto" end
+' "$FLAGS" > "$tmp"
 chmod 0644 "$tmp"
 mv "$tmp" "$FLAGS"
 printf '%s\n' "$DEFAULT" > "$STATEBASE/ricelin-wallpaper"
 
-# Remember the dark choice for 4.jpg as well, so wallpaper.sh does not fall
-# back to Auto after a later wallpaper switch. The other bundled wallpapers are
-# cleared so they keep following Auto.
-if [ -s "$TONE" ] && jq -e 'type == "object"' "$TONE" >/dev/null 2>&1; then
-    tmp=$(mktemp "$TONE.XXXXXX")
-    if jq --arg p "$DEFAULT" \
-        --arg a "$WALLDIR/1.png" --arg b "$WALLDIR/2.jpg" --arg c "$WALLDIR/3.png" \
-        'del(.[$a], .[$b], .[$c]) | .[$p] = "dark"' "$TONE" > "$tmp" 2>/dev/null; then
+SEEDED="$STATE/wallpaper-tone-seeded"
+if [ ! -e "$SEEDED" ]; then
+    if [ ! -s "$TONE" ] || ! jq -e 'type == "object"' "$TONE" >/dev/null 2>&1; then
+        tmp=$(mktemp "$TONE.XXXXXX")
+        jq -n --arg p "$DEFAULT" '{($p): "dark"}' > "$tmp"
         chmod 0644 "$tmp"
         mv "$tmp" "$TONE"
-    else
-        rm -f "$tmp"
+    elif ! jq -e --arg p "$DEFAULT" 'has($p)' "$TONE" >/dev/null 2>&1; then
+        tmp=$(mktemp "$TONE.XXXXXX")
+        jq --arg p "$DEFAULT" '.[$p] = "dark"' "$TONE" > "$tmp"
+        chmod 0644 "$tmp"
+        mv "$tmp" "$TONE"
     fi
-else
-    tmp=$(mktemp "$TONE.XXXXXX")
-    jq -n --arg p "$DEFAULT" '{($p): "dark"}' > "$tmp"
-    chmod 0644 "$tmp"
-    mv "$tmp" "$TONE"
+    : > "$SEEDED"
+    chmod 0644 "$SEEDED" 2>/dev/null || true
 fi
 
 # Point every current output at the default. The state file is authoritative
@@ -6723,7 +6724,7 @@ if [ -x "$CONFIG/hypr/scripts/wallpaper.sh" ] \
     bash "$CONFIG/hypr/scripts/wallpaper.sh" set "$DEFAULT" all >/dev/null 2>&1 || true
 fi
 
-echo "Wallpapers: 1.png, 2.jpg, 3.png, 4.jpg; default 4.jpg; 4.jpg tone dark, others auto."
+echo "Wallpapers: 1.png, 2.jpg, 3.png, 4.jpg; default 4.jpg; first install seeds 4.jpg as Dark, later choices are kept."
 )
 
 # ---------------------------------------------------------------- stage_personal_settings
