@@ -1123,7 +1123,7 @@ main() {
     run_step "Wallpaper folder in .config" stage_wallpaper_dir
     run_step "Wallpaper set + 4.jpg default" stage_wallpapers
     run_step "SUPER+I personal settings" stage_personal_settings
-    run_step "Hermes desktop skin" stage_hermes_skin
+    run_step "Hermes desktop integration" stage_hermes_skin
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
@@ -6217,11 +6217,13 @@ echo "SUPER+I: dynamic palette, Sunday week start, scheduled 19:00-06:00 night l
 
 # ---------------------------------------------------------------- stage_hermes_skin
 stage_hermes_skin() (
-# Render the Ricelin palette into a Hermes skin for the default desktop view.
-# HUD and Quick Entry are intentionally not themed: the generated CSS is
-# scoped to roots without their window markers. A systemd path unit re-renders
-# the skin when the wallpaper palette changes, and the skin is selected for the
-# next desktop launch.
+# Render the Ricelin palette into a Hermes skin for the default desktop view,
+# and keep Hermes's own user preferences in step with it. HUD and Quick Entry
+# are intentionally not themed: the generated CSS is scoped to roots without
+# their window markers, and the same script persists those features off and
+# unbinds the HUD chord. No Hermes source files are patched. A systemd path
+# unit re-runs the renderer when the wallpaper palette changes, and the skin is
+# selected for the next desktop launch.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -6231,8 +6233,9 @@ SCRIPT="$CFG/hypr/scripts/ricelin-hermes.py"
 UNIT="$CFG/systemd/user"
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
 RAW="https://raw.githubusercontent.com/wflzao/dots/main/integrations/hermes/ricelin-hermes.py"
+PLUGIN="$HH/desktop-plugins/ricelin-desktop/plugin.js"
 
-mkdir -p "$CFG/hypr/scripts" "$UNIT" "$HH/skins"
+mkdir -p "$CFG/hypr/scripts" "$UNIT" "$HH/skins" "$HH/desktop-plugins/ricelin-desktop"
 
 if [ -n "$HERE" ] && [ -s "$HERE/integrations/hermes/ricelin-hermes.py" ]; then
     install -m 0755 "$HERE/integrations/hermes/ricelin-hermes.py" "$SCRIPT"
@@ -6251,9 +6254,28 @@ else
     mv -f "$tmp" "$SCRIPT"
 fi
 
+if [ -n "$HERE" ] && [ -s "$HERE/integrations/hermes/ricelin-desktop/plugin.js" ]; then
+    install -m 0644 "$HERE/integrations/hermes/ricelin-desktop/plugin.js" "$PLUGIN"
+else
+    command -v curl >/dev/null 2>&1 || {
+        echo "curl is required to install the Ricelin desktop plugin." >&2
+        exit 1
+    }
+    tmp="$PLUGIN.tmp"
+    curl -fsSL --retry 3 --connect-timeout 15 \
+        "https://raw.githubusercontent.com/wflzao/dots/main/integrations/hermes/ricelin-desktop/plugin.js" \
+        -o "$tmp" || {
+        rm -f "$tmp"
+        echo "Could not download the Ricelin desktop plugin." >&2
+        exit 1
+    }
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$PLUGIN"
+fi
+
 cat > "$UNIT/ricelin-hermes-skin.service" <<'EOF'
 [Unit]
-Description=Render the Ricelin Hermes desktop skin from the wallpaper palette
+Description=Render the Ricelin Hermes skin and desktop preferences from the wallpaper palette
 Documentation=file:%h/.config/hypr/scripts/ricelin-hermes.py
 After=graphical-session.target
 
@@ -6265,7 +6287,7 @@ EOF
 
 cat > "$UNIT/ricelin-hermes-skin.path" <<'EOF'
 [Unit]
-Description=Watch the Ricelin palette and re-render the Hermes desktop skin
+Description=Watch the Ricelin palette and refresh the Hermes desktop customisation
 
 [Path]
 PathChanged=%h/.cache/ricelin/colors.json
@@ -6282,12 +6304,12 @@ python3 "$SCRIPT"
 
 if [ -x "$HOME/.local/bin/hermes" ]; then
     if "$HOME/.local/bin/hermes" config set display.skin ricelin >/dev/null 2>&1; then
-        echo "Hermes desktop skin: ricelin"
+        echo "Hermes desktop: ricelin skin, HUD and Quick Entry off"
     else
-        echo "Hermes desktop skin: rendered; could not select it in Hermes" >&2
+        echo "Hermes desktop: rendered; could not select the skin in Hermes" >&2
     fi
 else
-    echo "Hermes desktop skin: rendered; Hermes is not installed yet"
+    echo "Hermes desktop: rendered; Hermes is not installed yet"
 fi
 )
 

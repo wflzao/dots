@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
-"""Render the live Ricelin palette into Hermes's skin.
+"""Render the live Ricelin palette into Hermes and keep its desktop customisation
+in user space.
 
 The generated skin is used by the default desktop window. HUD and Quick Entry
 are deliberately out of scope: every rule here is scoped to a root without
 their window markers, so neither surface can inherit this theme if it returns.
+The same skin hides the HUD/Quick Entry controls and keeps the send / start
+voice CTA on the system accent.
+
+The behavioural switches live in Hermes's own user configuration, never in its
+source tree: Quick Entry and the HUD modifier tap are persisted off, and the
+HUD keyboard chord is unbound in the machine UI-preferences store. Text-only
+leftovers (the keybind rows) are hidden by the companion `ricelin-desktop`
+runtime plugin installed by install.sh.
 
 Run by the `ricelin-hermes-skin.path` user unit whenever the wallpaper palette
-changes. It writes one file and does not call Hermes.
+changes. It writes user files and does not call Hermes.
 """
 import json
 import os
+import secrets
+import shutil
 import sys
+import time
 from pathlib import Path
 
 HOME = Path.home()
@@ -18,6 +30,10 @@ CACHE = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "ricelin"
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or HOME / ".hermes")
 SKIN = HERMES_HOME / "skins" / "ricelin.yaml"
 PALETTE = CACHE / "colors.json"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+QUICK_ENTRY = CONFIG_DIR / "Hermes" / "quick-entry.json"
+HUD_MODIFIER = CONFIG_DIR / "Hermes" / "hud-modifier.json"
+UI_PREFERENCES = HERMES_HOME / "ui-preferences.json"
 
 DEFAULTS = {
     "surface": "#e9f4ff",
@@ -89,11 +105,23 @@ CSS = """:root:not([data-hud-window]):not([data-quick-entry-window]) {
 }
 
 /* The send / start-voice CTA is the system accent, not a foreground-black
-   circle. The source class list is corrected too; this keeps the skin correct
-   if a future desktop build ships the upstream foreground classes again. */
+   circle. The desktop ships this as a foreground-on-background button; the
+   skin is the one supported place to restyle it, so an app update cannot put
+   the black circle back. */
 :root:not([data-hud-window]):not([data-quick-entry-window]) [data-slot='composer-root'] button[class*='bg-foreground'] {
   background-color: var(--ricelin-primary) !important;
   color: #fff !important;
+}
+
+/* Hide the leftover HUD and Quick Entry affordances. The features themselves
+   are switched off in Hermes's user configuration below; these controls have
+   no per-user visibility setting, so the skin removes them from the shell. */
+:root:not([data-hud-window]):not([data-quick-entry-window]) [data-titlebar-cluster] button:has(i.codicon-comment-discussion),
+:root:not([data-hud-window]):not([data-quick-entry-window]) [data-tour='nav-keybinds:hud-gesture'],
+:root:not([data-hud-window]):not([data-quick-entry-window]) [id='setting-field-keybinds.hud-modifier'],
+:root:not([data-hud-window]):not([data-quick-entry-window]) [id='setting-field-advanced.quick-entry'],
+:root:not([data-hud-window]):not([data-quick-entry-window]) [id='setting-field-advanced.quick-entry-shortcut'] {
+  display: none !important;
 }
 """
 
@@ -161,8 +189,166 @@ def skin_text(p):
     return "\n".join(lines) + "\n"
 
 
+def _read_json(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def disable_quick_entry():
+    """Persist Quick Entry off, keeping the last chord for a clean re-enable."""
+    current = _read_json(QUICK_ENTRY) or {}
+    shortcut = current.get("shortcut")
+    if not isinstance(shortcut, str) or not shortcut.strip():
+        shortcut = "CommandOrControl+Shift+Space"
+    settings = {**current, "enabled": False, "shortcut": shortcut}
+    if current == settings:
+        return False
+    _write_json(QUICK_ENTRY, settings)
+    return True
+
+
+def disable_hud_modifier():
+    """Persist the HUD modifier-tap permission off."""
+    current = _read_json(HUD_MODIFIER) or {}
+    settings = {**current, "enabled": False}
+    if current == settings:
+        return False
+    _write_json(HUD_MODIFIER, settings)
+    return True
+
+
+def _lock_ui_preferences():
+    """Take the same ``<store>.lock`` directory lock the desktop/Python writers use."""
+    lock = UI_PREFERENCES.with_name(f"{UI_PREFERENCES.name}.lock")
+    token = f"{os.getpid()}-{secrets.token_hex(8)}"
+    deadline = time.monotonic() + 3.0
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - lock.stat().st_mtime > 10.0
+            except FileNotFoundError:
+                continue
+            if stale:
+                shutil.rmtree(lock, ignore_errors=True)
+                continue
+            if time.monotonic() > deadline:
+                raise RuntimeError("Hermes UI preferences are busy")
+            time.sleep(0.02)
+    (lock / "owner").write_text(token, encoding="utf-8")
+    return lock, token
+
+
+def _unlock_ui_preferences(lock, token):
+    try:
+        owner = (lock / "owner").read_text(encoding="utf-8")
+    except OSError:
+        return
+    if owner == token:
+        shutil.rmtree(lock, ignore_errors=True)
+
+
+def _read_ui_preferences():
+    try:
+        doc = json.loads(UI_PREFERENCES.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return {"corrupt": False, "exists": False, "generation": "", "revision": 0, "values": {}}
+    except (OSError, ValueError):
+        return {"corrupt": True, "exists": False, "generation": "", "revision": 0, "values": {}}
+    if not isinstance(doc, dict):
+        return {"corrupt": True, "exists": False, "generation": "", "revision": 0, "values": {}}
+    values = doc.get("values")
+    values = values if isinstance(values, dict) else {}
+    return {
+        "corrupt": False,
+        "exists": True,
+        "generation": doc.get("generation") if isinstance(doc.get("generation"), str) else "",
+        "revision": doc.get("revision") if isinstance(doc.get("revision"), int) else 0,
+        "values": {k: v for k, v in values.items() if isinstance(k, str) and isinstance(v, str)},
+    }
+
+
+def _write_ui_preferences(payload):
+    tmp = UI_PREFERENCES.with_name(f".{UI_PREFERENCES.name}.{os.getpid()}.{int(time.time() * 1000)}")
+    tmp.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, UI_PREFERENCES)
+
+
+def unbind_hud_keybind():
+    """Clear the HUD chord in the machine UI-preferences store the app reads."""
+    lock, token = _lock_ui_preferences()
+    try:
+        current = _read_ui_preferences()
+        if current["corrupt"] and UI_PREFERENCES.exists():
+            backup = UI_PREFERENCES.with_name(f"{UI_PREFERENCES.name}.corrupt-{int(time.time() * 1000)}")
+            shutil.copy2(UI_PREFERENCES, backup)
+        values = dict(current["values"])
+        raw = values.get("hermes.desktop.keybinds")
+        try:
+            bindings = json.loads(raw) if raw else {}
+        except ValueError:
+            bindings = {}
+        if not isinstance(bindings, dict):
+            bindings = {}
+        bindings["view.toggleHud"] = []
+        encoded = json.dumps(bindings, separators=(",", ":"))
+        if current["exists"] and raw == encoded:
+            return False
+        values["hermes.desktop.keybinds"] = encoded
+        # A write from another process may have replaced the lock; never clobber it.
+        try:
+            if (lock / "owner").read_text(encoding="utf-8") != token:
+                return False
+        except OSError:
+            return False
+        _write_ui_preferences(
+            {
+                "version": 1,
+                "generation": current["generation"] or secrets.token_hex(8),
+                "revision": current["revision"] + 1,
+                "values": values,
+            }
+        )
+        return True
+    finally:
+        _unlock_ui_preferences(lock, token)
+
+
+def apply_desktop_preferences():
+    """Apply every switch independently: a busy app config must not stop the skin."""
+    changed = []
+    for apply, path in (
+        (disable_quick_entry, QUICK_ENTRY),
+        (disable_hud_modifier, HUD_MODIFIER),
+        (unbind_hud_keybind, UI_PREFERENCES),
+    ):
+        try:
+            if apply():
+                changed.append(path)
+        except (OSError, RuntimeError) as error:
+            print(f"ricelin-hermes: could not update {path}: {error}", file=sys.stderr)
+    return changed
+
+
 def main():
     text = skin_text(palette())
+    changed = apply_desktop_preferences()
+    for path in changed:
+        print(f"ricelin-hermes: updated {path}")
     try:
         if SKIN.read_text(encoding="utf-8") == text:
             print(f"ricelin-hermes: {SKIN} already current")
