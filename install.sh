@@ -13,9 +13,8 @@
 #      nvidia-settings, Zen, OpenCode and nvibrant-bin. AUR packages go through
 #      yay/paru; yay is bootstrapped if the base installer left no helper
 #      behind. Hermes Agent and its Electron Desktop are installed next with
-#      the bootstrap's interactive setup skipped; the installer never asks for
-#      a provider, model, key or tool. Run `hermes setup` afterwards to
-#      configure them.
+#      their own interactive setup wizard; the installer does not preselect
+#      providers, models, keys or tools for Hermes.
 #   4. The requested SDDM order: install the package, create
 #      /etc/sddm.conf.d, then run the upstream torii theme installer at its
 #      real path, configs/sddm/themes/torii/install.sh. (The old guessed path
@@ -207,7 +206,7 @@ run_step() {
 }
 
 # Like run_step, but keeps long-running output visible. Used by Hermes: the
-# desktop build takes minutes and streams its progress.
+# desktop build takes minutes and its own setup wizard needs the terminal.
 run_step_stream() {
     local label=$1; shift
     STEP=$((STEP + 1))
@@ -527,9 +526,9 @@ install_hermes() (
 # Install Hermes Agent and build its Electron desktop app.
 #
 # The official bootstrap is used with --include-desktop so the CLI, the native
-# desktop app and its launcher are all produced. --skip-setup keeps the
-# installer non-interactive: it never asks for a provider, model, API key,
-# tools, gateway or telemetry. Configure Hermes afterwards with `hermes setup`.
+# desktop app and its launcher are all produced. Its own interactive setup
+# wizard runs as part of the bootstrap: provider, model, API key, tools,
+# gateway and telemetry are the user's choices, not the installer's.
 set -eu
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -558,8 +557,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$tmp" || {
     printf 'Could not download the Hermes installer.\n' >&2
     exit 1
 }
-bash "$tmp" --include-desktop --skip-setup
-printf '\nHermes setup skipped. Run `hermes setup` when you are ready to choose a provider, model and API key.\n'
+bash "$tmp" --include-desktop
 )
 
 install_sddm() {
@@ -1127,6 +1125,7 @@ main() {
     run_step "SUPER+I personal settings" stage_personal_settings
     run_step "Hermes desktop integration" stage_hermes_skin
     run_step "Hermes desktop log quieting" stage_hermes_logs
+    run_step "AI agent pill activity" stage_agent_activity
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
@@ -6412,82 +6411,128 @@ echo "SUPER+I: dynamic palette, Sunday week start, scheduled 19:00-06:00 night l
 stage_hermes_skin() (
 # Render the Ricelin palette into a Hermes skin for the default desktop view,
 # and keep Hermes's own user preferences in step with it. HUD and Quick Entry
-# are intentionally not themed: the generated CSS is scoped to roots without
-# their window markers, and the same renderer persists those features off and
-# unbinds the HUD chord. No Hermes source files are patched.
+# are intentionally not themed: the CSS is scoped to roots without their window
+# markers, and the installer persists those features off and unbinds the HUD
+# chord. No Hermes source files are patched.
 #
-# The renderer and the small desktop plugin are embedded below: install.sh is
-# the single source of truth, so there is no integrations/ folder to copy or
-# download. The installer still materialises both under the user's Hermes and
-# Hyprland config so the systemd path unit and the desktop plugin loader can
-# run them. A palette change re-runs the renderer; the skin is selected for the
-# next desktop launch.
+# The skin belongs to the normal palette pass: render_hermes() is added to
+# wallcolors.py and called from publish(), so every wallpaper change refreshes
+# the skin without a second renderer or a watcher. The small desktop plugin is
+# still a real file because Hermes's plugin loader reads it from disk; both it
+# and the renderer are embedded here so install.sh is the single source.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 HH="${HERMES_HOME:-$HOME/.hermes}"
-SCRIPT="$CFG/hypr/scripts/ricelin-hermes.py"
+WC="$CFG/hypr/scripts/wallcolors.py"
 PLUGIN="$HH/desktop-plugins/ricelin-desktop/plugin.js"
 UNIT="$CFG/systemd/user"
 
-mkdir -p "$CFG/hypr/scripts" "$UNIT" "$HH/skins" "$HH/desktop-plugins/ricelin-desktop"
+mkdir -p "$HH/skins" "$HH/desktop-plugins/ricelin-desktop" "$UNIT"
 
-cat > "$SCRIPT.tmp" <<'HERMES_SKIN_PY'
-#!/usr/bin/env python3
-"""Render the live Ricelin palette into Hermes and keep its desktop customisation
-in user space.
+cat > "$PLUGIN.tmp" <<'HERMES_PLUGIN_JS'
+/**
+ * Ricelin desktop integration.
+ *
+ * The feature switches themselves live in Hermes's user configuration, written
+ * by install.sh: Quick Entry and the HUD modifier are off and the HUD chord is
+ * clear. This tiny runtime plugin only finishes the UI: it hides the leftover
+ * keybind rows whose labels mention HUD (the app has no per-action visibility
+ * setting, and CSS cannot select by text).
+ *
+ * It sweeps only while Settings is open, so chat streaming never pays for it.
+ * Installed to `~/.hermes/desktop-plugins/ricelin-desktop/plugin.js` by the
+ * Hermes desktop stage in install.sh. It is user-space code: no Hermes source
+ * file is modified, and disabling this plugin only restores the rows.
+ */
 
-The generated skin is used by the default desktop window. HUD and Quick Entry
-are deliberately out of scope: every rule here is scoped to a root without
-their window markers, so neither surface can inherit this theme if it returns.
-The same skin hides the HUD/Quick Entry controls and keeps the send / start
-voice CTA on the system accent.
+const HIDDEN_ROW = /\b(?:HUD|Quick Entry)\b/i
 
-The behavioural switches live in Hermes's own user configuration, never in its
-source tree: Quick Entry and the HUD modifier tap are persisted off, and the
-HUD keyboard chord is unbound in the machine UI-preferences store. Text-only
-leftovers (the keybind rows) are hidden by the companion `ricelin-desktop`
-runtime plugin installed by install.sh.
+const settingsOpen = () => `${location.hash}${location.pathname}`.includes('/settings')
 
-Run by the `ricelin-hermes-skin.path` user unit whenever the wallpaper palette
-changes. It writes user files and does not call Hermes.
-"""
-import json
-import os
-import secrets
-import shutil
-import sys
-import time
-from pathlib import Path
+export default {
+  id: 'ricelin-desktop',
+  name: 'Ricelin desktop',
+  description: 'Keeps the HUD and Quick Entry controls out of the shell while Ricelin disables those features.',
+  defaultEnabled: true,
 
-HOME = Path.home()
-CACHE = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "ricelin"
-HERMES_HOME = Path(os.environ.get("HERMES_HOME") or HOME / ".hermes")
-SKIN = HERMES_HOME / "skins" / "ricelin.yaml"
-PALETTE = CACHE / "colors.json"
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
-QUICK_ENTRY = CONFIG_DIR / "Hermes" / "quick-entry.json"
-HUD_MODIFIER = CONFIG_DIR / "Hermes" / "hud-modifier.json"
-UI_PREFERENCES = HERMES_HOME / "ui-preferences.json"
+  register(ctx) {
+    const hidden = new Set()
 
-DEFAULTS = {
-    "surface": "#e9f4ff",
-    "surface_container_low": "#dfefff",
-    "surface_container": "#d6ebff",
-    "surface_container_high": "#d1e6fa",
-    "surface_container_highest": "#cadff2",
-    "outline_variant": "#a9c2da",
-    "primary": "#617e00",
-    "outline": "#657889",
-    "cream": "#1e2831",
-    "bright": "#0a131b",
-    "subtle": "#444e59",
-    "dim": "#626d78",
-    "faint": "#707c87",
+    const sweep = () => {
+      if (!settingsOpen()) {
+        return
+      }
+
+      // Keybind rows are either interactive (`div.group`) or fixed readonly
+      // rows; both put their label in a truncating span, so the label is the
+      // stable anchor.
+      for (const label of document.querySelectorAll("span[class*='truncate']")) {
+        const text = (label.textContent ?? '').trim()
+
+        if (!HIDDEN_ROW.test(text)) {
+          continue
+        }
+
+        const row = label.closest('div.group') ?? label.parentElement
+
+        if (row && !hidden.has(row)) {
+          hidden.add(row)
+          row.style.setProperty('display', 'none', 'important')
+        }
+      }
+    }
+
+    ctx.setInterval(sweep, 250)
+    ctx.onDispose(() => {
+      for (const row of hidden) {
+        row.style.removeProperty('display')
+      }
+
+      hidden.clear()
+    })
+    sweep()
+  }
 }
+HERMES_PLUGIN_JS
+chmod 0644 "$PLUGIN.tmp"
+mv -f "$PLUGIN.tmp" "$PLUGIN"
 
-CSS = """:root:not([data-hud-window]):not([data-quick-entry-window]) {
+[ -f "$WC" ] || { echo "wallcolors.py not found at $WC" >&2; exit 1; }
+
+render=$(mktemp)
+prefs=$(mktemp)
+trap 'rm -f "$render" "$prefs"' EXIT HUP INT TERM
+
+cat > "$render" <<'HERMES_RENDER_PY'
+def render_hermes(pill):
+    """Write the Ricelin skin for the Hermes desktop default window.
+
+    The palette engine already has the live pill dict, so the skin is rendered
+    in the same pass as the GTK/KDE/Hyprland outputs. write_if_changed keeps a
+    wallpaper that produced an identical palette from rewriting the file.
+    """
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    skin = home / "skins" / "ricelin.yaml"
+
+    p = {
+        "surface": pill.get("surface", "#e9f4ff"),
+        "surface_container_low": pill.get("surface_container_low", "#dfefff"),
+        "surface_container": pill.get("surface_container", "#d6ebff"),
+        "surface_container_high": pill.get("surface_container_high", "#d1e6fa"),
+        "surface_container_highest": pill.get("surface_container_highest", "#cadff2"),
+        "outline_variant": pill.get("outline_variant", "#a9c2da"),
+        "primary": pill.get("primary", "#617e00"),
+        "outline": pill.get("outline", "#657889"),
+        "cream": pill.get("cream", "#1e2831"),
+        "bright": pill.get("bright", "#0a131b"),
+        "subtle": pill.get("subtle", "#444e59"),
+        "dim": pill.get("dim", "#626d78"),
+        "faint": pill.get("faint", "#707c87"),
+    }
+
+    css = """:root:not([data-hud-window]):not([data-quick-entry-window]) {
   --ricelin-surface: {surface};
   --ricelin-surface-low: {surface_container_low};
   --ricelin-surface-container: {surface_container};
@@ -6560,20 +6605,9 @@ CSS = """:root:not([data-hud-window]):not([data-quick-entry-window]) {
   display: none !important;
 }
 """
+    for key, value in p.items():
+        css = css.replace("{" + key + "}", value)
 
-
-def palette():
-    values = dict(DEFAULTS)
-    try:
-        data = json.loads(PALETTE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return values
-    if isinstance(data, dict):
-        values.update({k: v for k, v in data.items() if isinstance(v, str)})
-    return values
-
-
-def skin_text(p):
     colors = {
         "background": p["surface"],
         "ui_text": p["cream"],
@@ -6609,21 +6643,38 @@ def skin_text(p):
     }
 
     lines = [
-        "# ricelin — generated by ~/.config/hypr/scripts/ricelin-hermes.py",
+        "# ricelin — generated by the Ricelin palette engine",
         "name: ricelin",
         "description: Ricelin palette for the Hermes desktop.",
         "colors:",
     ]
     lines += [f'  {key}: "{value}"' for key, value in colors.items()]
 
-    css = CSS
-    for key, value in p.items():
-        css = css.replace("{" + key + "}", value)
-
     lines += ["customCSS: |"]
     lines += ["  " + line for line in css.splitlines()]
-    return "\n".join(lines) + "\n"
+    try:
+        write_if_changed(skin, "\n".join(lines) + "\n")
+    except OSError as error:
+        print(f"ricelin: could not write the Hermes skin: {error}", file=sys.stderr)
 
+
+HERMES_RENDER_PY
+
+cat > "$prefs" <<'HERMES_PREFS_PY'
+import json
+import os
+import secrets
+import shutil
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+HERMES_HOME = Path(os.environ.get("HERMES_HOME") or HOME / ".hermes")
+QUICK_ENTRY = CONFIG_DIR / "Hermes" / "quick-entry.json"
+HUD_MODIFIER = CONFIG_DIR / "Hermes" / "hud-modifier.json"
+UI_PREFERENCES = HERMES_HOME / "ui-preferences.json"
 
 def _read_json(path):
     try:
@@ -6780,127 +6831,70 @@ def apply_desktop_preferences():
     return changed
 
 
-def main():
-    text = skin_text(palette())
-    changed = apply_desktop_preferences()
-    for path in changed:
-        print(f"ricelin-hermes: updated {path}")
-    try:
-        if SKIN.read_text(encoding="utf-8") == text:
-            print(f"ricelin-hermes: {SKIN} already current")
-            return 0
-    except OSError:
-        pass
-    SKIN.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SKIN.with_name(f".{SKIN.name}.{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, SKIN)
-    print(f"ricelin-hermes: wrote {SKIN}")
-    return 0
+changed = apply_desktop_preferences()
+for path in changed:
+    print(f"ricelin-hermes: updated {path}")
+HERMES_PREFS_PY
 
+python3 - "$WC" "$render" <<'PY'
+import os
+import re
+import sys
 
-if __name__ == "__main__":
-    sys.exit(main())
-HERMES_SKIN_PY
-chmod 0755 "$SCRIPT.tmp"
-mv -f "$SCRIPT.tmp" "$SCRIPT"
+path, blockfile = sys.argv[1], sys.argv[2]
+src = open(path, encoding="utf-8").read()
+block = open(blockfile, encoding="utf-8").read().rstrip() + "\n\n\n"
+original = src
 
-cat > "$PLUGIN.tmp" <<'HERMES_PLUGIN_JS'
-/**
- * Ricelin desktop integration.
- *
- * The feature switches themselves live in Hermes's user configuration:
- * `ricelin-hermes.py` persists Quick Entry and the HUD modifier off and clears
- * the HUD chord. This tiny runtime plugin only finishes the UI: it hides the
- * leftover keybind rows whose labels mention HUD (the app has no per-action
- * visibility setting, and CSS cannot select by text).
- *
- * It sweeps only while Settings is open, so chat streaming never pays for it.
- * Installed to `~/.hermes/desktop-plugins/ricelin-desktop/plugin.js` by the
- * Hermes desktop stage in install.sh. It is user-space code: no Hermes source
- * file is modified, and disabling this plugin only restores the rows.
- */
+start = src.find("def render_hermes(pill):")
+if start != -1:
+    end = src.find("\ndef ", start + 1)
+    if end == -1:
+        sys.exit("wallcolors.py: render_hermes() block is unbalanced")
+    src = src[:start] + block + src[end + 1:]
+else:
+    anchor = "def publish(pill, source_hex):"
+    if anchor not in src:
+        sys.exit("wallcolors.py: publish() anchor is missing")
+    src = src.replace(anchor, block + anchor, 1)
 
-const HIDDEN_ROW = /\b(?:HUD|Quick Entry)\b/i
+if "    render_hermes(pill)\n" not in src:
+    match = re.search(r"(?m)^    render_fastfetch\(pill\)\n", src)
+    if not match:
+        sys.exit("wallcolors.py: render_fastfetch() call is missing")
+    src = src[:match.end()] + "    render_hermes(pill)\n" + src[match.end():]
 
-const settingsOpen = () => `${location.hash}${location.pathname}`.includes('/settings')
+if src == original:
+    print("wallcolors.py: Hermes renderer already current")
+    sys.exit(0)
 
-export default {
-  id: 'ricelin-desktop',
-  name: 'Ricelin desktop',
-  description: 'Keeps the HUD and Quick Entry controls out of the shell while Ricelin disables those features.',
-  defaultEnabled: true,
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write(src)
+os.replace(tmp, path)
+print("wallcolors.py: Hermes renderer installed")
+PY
 
-  register(ctx) {
-    const hidden = new Set()
+python3 "$prefs"
 
-    const sweep = () => {
-      if (!settingsOpen()) {
-        return
-      }
-
-      // Keybind rows are either interactive (`div.group`) or fixed readonly
-      // rows; both put their label in a truncating span, so the label is the
-      // stable anchor.
-      for (const label of document.querySelectorAll("span[class*='truncate']")) {
-        const text = (label.textContent ?? '').trim()
-
-        if (!HIDDEN_ROW.test(text)) {
-          continue
-        }
-
-        const row = label.closest('div.group') ?? label.parentElement
-
-        if (row && !hidden.has(row)) {
-          hidden.add(row)
-          row.style.setProperty('display', 'none', 'important')
-        }
-      }
-    }
-
-    ctx.setInterval(sweep, 250)
-    ctx.onDispose(() => {
-      for (const row of hidden) {
-        row.style.removeProperty('display')
-      }
-
-      hidden.clear()
-    })
-    sweep()
-  }
-}
-HERMES_PLUGIN_JS
-chmod 0644 "$PLUGIN.tmp"
-mv -f "$PLUGIN.tmp" "$PLUGIN"
-
-cat > "$UNIT/ricelin-hermes-skin.service" <<'EOF'
-[Unit]
-Description=Render the Ricelin Hermes skin and desktop preferences from the wallpaper palette
-Documentation=file:%h/.config/hypr/scripts/ricelin-hermes.py
-After=graphical-session.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/env python3 %h/.config/hypr/scripts/ricelin-hermes.py
-RemainAfterExit=no
-EOF
-
-cat > "$UNIT/ricelin-hermes-skin.path" <<'EOF'
-[Unit]
-Description=Watch the Ricelin palette and refresh the Hermes desktop customisation
-
-[Path]
-PathChanged=%h/.cache/ricelin/colors.json
-Unit=ricelin-hermes-skin.service
-
-[Install]
-WantedBy=default.target
-EOF
-
+# Earlier installs used a standalone renderer and a systemd path unit. Remove
+# them; the palette pass now owns the skin.
+systemctl --user disable --now ricelin-hermes-skin.path >/dev/null 2>&1 || true
+systemctl --user disable --now ricelin-hermes-skin.service >/dev/null 2>&1 || true
+rm -f "$UNIT/ricelin-hermes-skin.path" "$UNIT/ricelin-hermes-skin.service"
+rm -f "$CFG/hypr/scripts/ricelin-hermes.py"
 systemctl --user daemon-reload >/dev/null 2>&1 || true
-systemctl --user enable --now ricelin-hermes-skin.path >/dev/null 2>&1 || true
 
-python3 "$SCRIPT"
+# Apply the current palette now if one is known; the next wallpaper change
+# refreshes it through wallcolors.py.
+wall=$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)
+if [ -n "$wall" ] && [ -f "$wall" ]; then
+    python3 "$WC" "$wall" >/dev/null 2>&1 || true
+fi
+
+python3 -m py_compile "$WC"
+rm -f "$(dirname "$WC")/__pycache__/wallcolors."*.pyc
+rmdir "$(dirname "$WC")/__pycache__" 2>/dev/null || true
 
 if [ -x "$HOME/.local/bin/hermes" ]; then
     if "$HOME/.local/bin/hermes" config set display.skin ricelin >/dev/null 2>&1; then

@@ -7,18 +7,18 @@ re-run safely.
 
 - Installs SDDM, the Thunar stack, Zen Browser, OpenCode and NVIDIA tools.
 - Installs Hermes Agent and builds Hermes Desktop through the official
-  bootstrap with `--skip-setup`. The installer never prompts for a provider,
-  model, API key, tools, gateway or telemetry; run `hermes setup` afterwards
-  to configure them.
+  bootstrap and runs Hermes's own interactive setup wizard. The provider,
+  model, API key, tools, gateway and telemetry choices are made in that wizard;
+  the installer does not preselect them.
 - Clones or updates Ricelin in `~/.local/share/ricelin` and runs
   `install.sh --quickstart --sddm`.
 - Installs and themes SDDM with the palette-driven torii/ricelin theme.
 - Copies the live SUPER+I choices that differ from stock: dynamic palette,
   Sunday week start, and a scheduled 3500 K night light from 19:00 to 06:00
   that fades in and out over 5 minutes.
-- Generates a Ricelin skin for the Hermes Desktop default window and re-renders
-  it when the wallpaper palette changes. HUD and Quick Entry are disabled and
-  their controls hidden.
+- Generates a Ricelin skin for the Hermes Desktop default window from the
+  normal palette pass, so it refreshes whenever `wallcolors.py` runs. HUD and
+  Quick Entry are disabled and their controls hidden.
 - Moves wallpapers from `~/Ricelin/wallpapers` to
   `~/.config/ricelin/wallpapers`, updates the saved paths, installs the bundled
   `1.png`, `2.jpg`, `3.png` and `4.jpg` set, and makes `4.jpg` the default with
@@ -120,9 +120,10 @@ start so the privileged phases do not prompt repeatedly.
   Change the wallpaper from the strip or SUPER+B, and the tone from
   SUPER+I > Appearance > Palette; the choice is remembered per wallpaper.
 - Hermes is available as `hermes` and from the **Hermes** desktop launcher.
-  The installer skips Hermes's setup wizard. Configure a provider, model and
-  API key with `hermes setup` (or `hermes config set OPENCODE_GO_API_KEY <key>`
-  for your provider) and restart the gateway with `hermes gateway restart`.
+  The installer runs Hermes's own setup wizard; if you skipped the key there,
+  add it later with `hermes config set OPENCODE_GO_API_KEY <key>` (or the key
+  for the provider you chose) and restart the gateway with
+  `hermes gateway restart`.
 - After `ricelin update`, re-apply the customisation layer:
 
   ```sh

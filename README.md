@@ -52,9 +52,9 @@ The installer runs six phases:
    `~/.config/hypr/.ricelin-managed` exists, unless `--reinstall-base`.
 3. **Packages** — SDDM, Thunar stack, greeter tools, `nvidia-settings`, Zen,
    OpenCode, `nvibrant-bin`; bootstraps `yay`/`paru` when needed. Hermes Agent
-   and Hermes Desktop are installed from the official bootstrap with
-   `--skip-setup`: the installer never asks for a provider, model, API key,
-   tools, gateway or telemetry. Run `hermes setup` afterwards to configure
+   and Hermes Desktop are installed from the official bootstrap with their own
+   interactive setup wizard: the provider, model, API key, tools, gateway and
+   telemetry choices are yours. The installer does not preselect or configure
    them.
 4. **SDDM** — installs the package, creates `/etc/sddm.conf.d`, runs the
    upstream theme installer at `configs/sddm/themes/torii/install.sh`.

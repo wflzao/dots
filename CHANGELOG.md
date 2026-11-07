@@ -11,13 +11,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Installs OpenCode from the Arch `extra` repository.
 - Installs Hermes Agent and builds Hermes Desktop through the official
-  bootstrap with `--skip-setup`; the installer never prompts for a provider,
-  model, API key, tools, gateway or telemetry. `hermes setup` configures them
-  afterwards.
+  bootstrap and runs Hermes's own interactive setup wizard for the provider,
+  model, API key, tools, gateway and telemetry.
 - Adds a generated Ricelin skin for the Hermes Desktop default window. HUD and
   Quick Entry are disabled and their controls hidden.
-- Embeds the Hermes skin renderer and desktop plugin directly in `install.sh`
-  and removes the separate `integrations/` folder.
+- Renders the Hermes skin from the normal palette pass in `wallcolors.py`; no
+  separate Hermes renderer or systemd watcher is installed.
+- Embeds the Hermes renderer and desktop plugin directly in `install.sh` and
+  removes the separate `integrations/` folder.
 - Adds the four Ricelin wallpapers (`1.png`, `2.jpg`, `3.png`, `4.jpg`) to the
   repository and installs them into `~/.config/ricelin/wallpapers`; `4.jpg` is
   the default wallpaper.
