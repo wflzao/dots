@@ -17,9 +17,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Adds the four Ricelin wallpapers (`1.png`, `2.jpg`, `3.png`, `4.jpg`) to the
   repository and installs them into `~/.config/ricelin/wallpapers`; `4.jpg` is
   the default wallpaper.
-- Defaults the dynamic matugen palette tone to Dark instead of Auto.
+- Pins only the default `4.jpg` wallpaper's dynamic matugen palette tone to
+  Dark; the other wallpapers stay on Auto.
 - Copies the live SUPER+I choices: dynamic palette, Sunday week start, and a
   scheduled 3500 K night light from 19:00 to 06:00.
+- Fades the scheduled night light between 6500 K and the chosen temperature
+  over 5 minutes instead of switching abruptly at 19:00 and 06:00.
 - Moves wallpapers to `~/.config/ricelin/wallpapers`, migrates the saved paths
   and restores the executable bit on the wallpaper helpers so SUPER+B works.
 - Pins each active monitor to its native resolution and highest refresh rate

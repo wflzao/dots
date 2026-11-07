@@ -52,19 +52,19 @@ The installer runs six phases:
    `~/.config/hypr/.ricelin-managed` exists, unless `--reinstall-base`.
 3. **Packages** — SDDM, Thunar stack, greeter tools, `nvidia-settings`, Zen,
    OpenCode, `nvibrant-bin`; bootstraps `yay`/`paru` when needed. Hermes Agent
-   and Hermes Desktop are installed from the official bootstrap, and the
-   wizard choices are applied non-interactively: OpenCode Go,
-   `deepseek-v4.1-flash`, high reasoning, local terminal and browser, Exa free
-   search, a curated CLI toolset, the gateway user service and telemetry off.
-   The OpenCode Go API key comes from `OPENCODE_GO_API_KEY` or a hidden prompt.
+   and Hermes Desktop are installed from the official bootstrap with their own
+   interactive setup wizard: the provider, model, API key, tools, gateway and
+   telemetry choices are yours. The installer does not preselect or configure
+   them.
 4. **SDDM** — installs the package, creates `/etc/sddm.conf.d`, runs the
    upstream theme installer at `configs/sddm/themes/torii/install.sh`.
 5. **Customisation** — system handover, diff-only updater, SDDM palette and
    greeter, fans/vibrance, the live SUPER+I choices (dynamic palette, Sunday
-   week start, scheduled 3500 K night light), the bundled wallpaper set
-   (`1.png`, `2.jpg`, `3.png`, `4.jpg`) in `~/.config/ricelin/wallpapers` with
-   `4.jpg` as the default and the matugen tone pinned to Dark, native
-   resolution at the highest refresh,
+   week start, scheduled 3500 K night light with a 5-minute fade), the bundled
+   wallpaper set (`1.png`, `2.jpg`, `3.png`, `4.jpg`) in
+   `~/.config/ricelin/wallpapers` with
+   `4.jpg` as the default with its matugen tone pinned to Dark while the
+   others stay on Auto, native resolution at the highest refresh,
    KDE/fish and terminal palette, portal colour-scheme sync, Zen colours,
    Thunar, polkit, night-light cursor, wallpaper tone, wallpaper-strip
    centring, lock-screen palette, settings zoom, atomic theme writes, menus,
@@ -76,9 +76,10 @@ The installer removes **LightDM**, **Firefox** and **Dolphin**, including their
 user configuration, and switches to SDDM, Zen and Thunar. It never stops the
 running graphical session. A reboot is required to land on SDDM.
 
-New installs start on `4.jpg` with the dynamic matugen palette forced to
-**Dark**. Change the wallpaper from the strip or SUPER+B, and the tone from
-SUPER+I > Appearance > Palette; **Auto** remains available per wallpaper.
+New installs start on `4.jpg` with its dynamic matugen palette forced to
+**Dark**. Other wallpapers stay on **Auto** and derive light or dark from the
+image. Change the wallpaper from the strip or SUPER+B, and the tone from
+SUPER+I > Appearance > Palette; the choice is remembered per wallpaper.
 
 ## Logs and exit codes
 

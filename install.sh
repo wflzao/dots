@@ -12,19 +12,19 @@
 #   3. Extra packages: SDDM, the Thunar stack, the greeter's xrandr/xrdb,
 #      nvidia-settings, Zen, OpenCode and nvibrant-bin. AUR packages go through
 #      yay/paru; yay is bootstrapped if the base installer left no helper
-#      behind. Hermes Agent and its Electron Desktop are installed next, then
-#      configured non-interactively for OpenCode Go, local tools and the
-#      gateway service.
+#      behind. Hermes Agent and its Electron Desktop are installed next with
+#      their own interactive setup wizard; the installer does not preselect
+#      providers, models, keys or tools for Hermes.
 #   4. The requested SDDM order: install the package, create
 #      /etc/sddm.conf.d, then run the upstream torii theme installer at its
 #      real path, configs/sddm/themes/torii/install.sh. (The old guessed path
 #      config/sddm/theme/tokii/install.sh does not exist.)
 #   5. The tested Ricelin customisation scripts, grouped by dependency:
 #        system handover -> updater guard -> SDDM palette/greeter ->
-#        fans/vibrance -> wallpaper folder -> personal settings/display ->
-#        palette/terminal -> Thunar/polkit -> lock screen -> wallpaper strip ->
-#        menus/glass/game mode -> screenshots/UI tweaks -> clipboard scrolling
-#        -> logout.
+#        fans/vibrance -> wallpaper folder -> personal settings/night-light
+#        fade/display -> palette/terminal -> Thunar/polkit -> lock screen ->
+#        wallpaper strip -> menus/glass/game mode -> screenshots/UI tweaks ->
+#        clipboard scrolling -> logout.
 #   6. Final palette render and a verification pass.
 #
 # Usage:
@@ -206,7 +206,7 @@ run_step() {
 }
 
 # Like run_step, but keeps long-running output visible. Used by Hermes: the
-# desktop build takes minutes and the API-key prompt needs the terminal.
+# desktop build takes minutes and its own setup wizard needs the terminal.
 run_step_stream() {
     local label=$1; shift
     STEP=$((STEP + 1))
@@ -526,9 +526,9 @@ install_hermes() (
 # Install Hermes Agent and build its Electron desktop app.
 #
 # The official bootstrap is used with --include-desktop so the CLI, the native
-# desktop app and its launcher are all produced. --skip-setup keeps Hermes's
-# own interactive wizard out of the way: configure_hermes applies the same
-# choices non-interactively immediately afterwards.
+# desktop app and its launcher are all produced. Its own interactive setup
+# wizard runs as part of the bootstrap: provider, model, API key, tools,
+# gateway and telemetry are the user's choices, not the installer's.
 set -eu
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -557,72 +557,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o "$tmp" || {
     printf 'Could not download the Hermes installer.\n' >&2
     exit 1
 }
-bash "$tmp" --include-desktop --skip-setup
-)
-
-configure_hermes() (
-# Apply the setup choices that the Hermes wizard would otherwise ask for.
-#
-# Model: OpenCode Go, deepseek-v4.1-flash, high reasoning.
-# Runtime: local terminal, local Chromium, Exa free web search.
-# Tools: everything useful except image/video generation, X search, TTS,
-#        Kanban, A2A, Yuanbao, cron jobs and video analysis.
-# Gateway: install and start the user service, with no messaging platforms.
-# Telemetry: "No thanks" (collection and upload both off).
-set -eu
-export PATH="$HOME/.local/bin:$PATH"
-
-local hb="$HOME/.local/bin/hermes"
-local hh="${HERMES_HOME:-$HOME/.hermes}"
-local envfile="$hh/.env"
-local key=""
-
-[ -x "$hb" ] || {
-    printf 'Hermes is not installed at %s.\n' "$hb" >&2
-    exit 1
-}
-mkdir -p "$hh"
-
-# The provider key is a secret, so it is never stored in this repository.
-# Reuse OPENCODE_GO_API_KEY, an existing ~/.hermes/.env entry, or ask once.
-if ! grep -Eq '^[[:space:]]*OPENCODE_GO_API_KEY=' "$envfile" 2>/dev/null; then
-    if [ -n "${OPENCODE_GO_API_KEY:-}" ]; then
-        "$hb" config set OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY" >/dev/null 2>&1
-    elif ( : </dev/tty ) 2>/dev/null; then
-        printf '\nOpenCode Go API key (input hidden): ' >/dev/tty
-        IFS= read -rs key </dev/tty || key=""
-        printf '\n' >/dev/tty
-        if [ -n "$key" ]; then
-            "$hb" config set OPENCODE_GO_API_KEY "$key" >/dev/null 2>&1
-            unset key
-        else
-            printf 'No key entered; run the installer again or add OPENCODE_GO_API_KEY to %s.\n' "$envfile" >&2
-        fi
-    else
-        printf 'No terminal for the OpenCode Go key; add OPENCODE_GO_API_KEY to %s.\n' "$envfile" >&2
-    fi
-fi
-
-"$hb" config set model.provider opencode-go >/dev/null
-"$hb" config set model.default deepseek-v4.1-flash >/dev/null
-"$hb" config set model.base_url https://opencode.ai/zen/go/v1 >/dev/null
-"$hb" config set model.api_mode chat_completions >/dev/null
-"$hb" config set --force agent.reasoning_effort high >/dev/null
-"$hb" config set terminal.backend local >/dev/null
-"$hb" config set browser.cloud_provider local >/dev/null
-"$hb" config set web.backend exa >/dev/null
-"$hb" config set web.provider_tier.exa free >/dev/null
-"$hb" config set platform_toolsets.cli \
-    '["browser","clarify","code_execution","computer_use","connections","context_engine","delegation","file","memory","session_search","skills","terminal","todo","vision","web"]' >/dev/null
-"$hb" config set gateway.service_install_choice install >/dev/null
-"$hb" config set telemetry.shared_metrics.enabled false >/dev/null
-"$hb" config set telemetry.shared_metrics.send false >/dev/null
-"$hb" config set --force telemetry.shared_metrics.offer_version 2 >/dev/null
-
-"$hb" gateway install --start-now --start-on-login >/dev/null
-"$hb" gateway restart >/dev/null 2>&1 || true
-
-printf 'Hermes: OpenCode Go / deepseek-v4.1-flash, high reasoning, local tools, gateway service.\n'
+bash "$tmp" --include-desktop
 )
 
 install_sddm() {
@@ -853,12 +788,12 @@ verify_report() {
     else
         ui_warn "SUPER+I: personal settings are not all applied"
     fi
-    if grep -q 'time = 19:00' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null \
-        && grep -q 'temperature = 3500' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null \
-        && grep -q 'time = 6:00' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null; then
-        ui_ok "Night light: 19:00-06:00 at 3500 K"
+    if grep -q 'ricelin-nightlight-ramp' "$HOME/.config/quickshell/pill/Singletons/NightLight.qml" 2>/dev/null \
+        && grep -q '^# Ricelin night-light ramp: 5 minutes' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null \
+        && [ "$(grep -c '^profile {' "$HOME/.config/hypr/hyprsunset.conf" 2>/dev/null || echo 0)" -gt 2 ]; then
+        ui_ok "Night light: 19:00-06:00 at 3500 K, 5-minute fade"
     else
-        ui_warn "Night light: scheduled profile not found"
+        ui_warn "Night light: scheduled fade missing"
     fi
 
     current=$(hyprctl monitors -j 2>/dev/null | jq -r '[.[] | select(.disabled == false)][0].name // empty' 2>/dev/null || true)
@@ -876,20 +811,31 @@ verify_report() {
     else
         ui_warn "Clipboard: row snapping still present"
     fi
-    local wallpapers_ok=1
+    local wallpapers_ok=1 tones_ok=1
     for name in 1.png 2.jpg 3.png 4.jpg; do
         [ -s "$HOME/.config/ricelin/wallpapers/$name" ] || wallpapers_ok=0
     done
+    if [ -f "$HOME/.local/state/ricelin/wallpaper-tone.json" ]; then
+        jq -e --arg p "$HOME/.config/ricelin/wallpapers/4.jpg" '.[$p] == "dark"' \
+            "$HOME/.local/state/ricelin/wallpaper-tone.json" >/dev/null 2>&1 || tones_ok=0
+        for name in 1.png 2.jpg 3.png; do
+            jq -e --arg p "$HOME/.config/ricelin/wallpapers/$name" 'has($p) | not' \
+                "$HOME/.local/state/ricelin/wallpaper-tone.json" >/dev/null 2>&1 || tones_ok=0
+        done
+    else
+        tones_ok=0
+    fi
     if [ -x "$HOME/.config/hypr/scripts/wallpaper.sh" ] \
         && [ -d "$HOME/.config/ricelin/wallpapers" ] \
         && [ ! -e "$HOME/Ricelin" ] \
         && [ "$wallpapers_ok" = 1 ] \
+        && [ "$tones_ok" = 1 ] \
         && [ "$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)" = "$HOME/.config/ricelin/wallpapers/4.jpg" ] \
-        && jq -e --arg dir "$HOME/.config/ricelin/wallpapers" '.wallpaperDir == $dir and .paletteTone == "dark"' \
+        && jq -e --arg dir "$HOME/.config/ricelin/wallpapers" '.wallpaperDir == $dir' \
             "$HOME/.local/state/ricelin/flags.json" >/dev/null 2>&1; then
-        ui_ok "Wallpapers: bundled set; 4.jpg default; matugen dark"
+        ui_ok "Wallpapers: bundled set; 4.jpg default and dark; others auto"
     else
-        ui_warn "Wallpapers: set, 4.jpg default or dark tone incomplete"
+        ui_warn "Wallpapers: set, 4.jpg default/tone or other tones incomplete"
     fi
     if python3 - "$HOME/.cache/ricelin/ghostty-colors" <<'PY'
 import re
@@ -960,15 +906,10 @@ PY
     if [ -x "$HOME/.local/bin/hermes" ]; then
         hprovider=$("$HOME/.local/bin/hermes" config get model.provider --raw 2>/dev/null | head -n1 || true)
         hmodel=$("$HOME/.local/bin/hermes" config get model.default --raw 2>/dev/null | head -n1 || true)
-        hreason=$("$HOME/.local/bin/hermes" config get agent.reasoning_effort --raw 2>/dev/null | head -n1 || true)
-        htools=$("$HOME/.local/bin/hermes" config get platform_toolsets.cli --json 2>/dev/null || true)
-        if [ "$hprovider" = "opencode-go" ] && [ "$hmodel" = "deepseek-v4.1-flash" ] \
-            && [ "$hreason" = "high" ] \
-            && printf '%s' "$htools" | grep -q '"browser"' \
-            && ! printf '%s' "$htools" | grep -Eq '"(image_gen|video_gen|x_search|tts|kanban|cronjob|video|yuanbao)"'; then
-            ui_ok "Hermes: OpenCode Go / deepseek-v4.1-flash / high reasoning"
+        if [ -n "$hprovider" ] && [ -n "$hmodel" ]; then
+            ui_ok "Hermes: $hprovider / $hmodel"
         else
-            ui_warn "Hermes: model or toolset choices differ"
+            ui_warn "Hermes: provider or model not configured yet (run 'hermes setup')"
         fi
         if [ -x "$HOME/.hermes/hermes-agent/apps/desktop/release/linux-unpacked/Hermes" ] \
             || [ -f "$HOME/.local/share/applications/com.nousresearch.hermes.desktop" ]; then
@@ -980,11 +921,6 @@ PY
             ui_ok "Hermes gateway: user service enabled"
         else
             ui_warn "Hermes gateway: user service not enabled"
-        fi
-        if grep -Eq '^[[:space:]]*OPENCODE_GO_API_KEY=' "$HOME/.hermes/.env" 2>/dev/null; then
-            ui_ok "Hermes: OpenCode Go key present"
-        else
-            ui_warn "Hermes: OpenCode Go key missing"
         fi
     else
         ui_warn "Hermes: not installed"
@@ -1160,7 +1096,6 @@ main() {
     fi
     run_step "Packages (Thunar stack, greeter tools, Zen, OpenCode, nvibrant)" install_packages
     run_step_stream "Hermes Agent + Desktop" install_hermes
-    run_step_stream "Hermes setup (model, tools, gateway)" configure_hermes
     run_step "SDDM package + $SDDM_CONF_DIR" install_sddm
     run_step "torii SDDM theme (configs/sddm/themes/torii)" install_torii_theme
 
@@ -1188,6 +1123,7 @@ main() {
     run_step "Wallpaper folder in .config" stage_wallpaper_dir
     run_step "Wallpaper set + 4.jpg default" stage_wallpapers
     run_step "SUPER+I personal settings" stage_personal_settings
+    run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
     run_step "Portal colour-scheme sync" stage_portal_scheme
@@ -3216,7 +3152,7 @@ stage_wallpaper_tone() (
 # The choice is remembered for each wallpaper in
 # ~/.local/state/ricelin/wallpaper-tone.json (path -> light|dark; Auto is the
 # absence of an entry). Switching back to a wallpaper restores its pick; a
-# wallpaper never seen before is Dark.
+# wallpaper never seen before is Auto.
 #
 # How it hangs together: wallcolors.py records the live flag into the store every
 # time it renders a wallpaper, and wallpaper.sh loads the store for the new
@@ -3311,7 +3247,7 @@ TONE_STORE = STATE / "wallpaper-tone.json"
 
 
 def palette_tone():
-    return flags().get("paletteTone", "dark")
+    return flags().get("paletteTone", "auto")
 
 
 def palette_light():
@@ -3372,9 +3308,9 @@ if mode == "apply":
     edit(wc, WC_ANCHOR, WC_ANCHOR + "\n" + WC_HELPER, "wallcolors.py helper", "def remember_tone")
     edit(wc, WC_MAIN_OLD, WC_MAIN_NEW, "wallcolors.py call", "remember_tone(key, palette_tone())")
     edit(wc, WC_CACHE_OLD, WC_CACHE_NEW, "wallcolors.py cache prune", "seen.items() if os.path.isfile(k)")
-    edit(wc, '    return flags().get("paletteTone", "auto")',
-         '    return flags().get("paletteTone", "dark")',
-         "wallcolors.py default dark", 'flags().get("paletteTone", "dark")')
+    edit(wc, '    return flags().get("paletteTone", "dark")',
+         '    return flags().get("paletteTone", "auto")',
+         "wallcolors.py default auto", 'flags().get("paletteTone", "auto")')
 else:
     edit(wc, "\n" + WC_HELPER, "", "wallcolors.py helper", "@@never@@")
     edit(wc, WC_MAIN_NEW, WC_MAIN_OLD, "wallcolors.py call", "@@never@@")
@@ -3396,8 +3332,8 @@ WP_BLOCK_NEW = """    mkdir -p "$(dirname "$STATE")"
     # ricelin-wallpaper-tone: each wallpaper remembers its own Auto/Light/Dark
     # pick, so load it before rendering. wallcolors writes the store from the live
     # flag, so reading the store first keeps this picture's value.
-    tone=$(jq -r --arg p "$pic" '.[$p] // "dark"' "$TONE_STORE" 2>/dev/null || echo dark)
-    [ -n "$tone" ] || tone=dark
+    tone=$(jq -r --arg p "$pic" '.[$p] // "auto"' "$TONE_STORE" 2>/dev/null || echo auto)
+    [ -n "$tone" ] || tone=auto
     if jq --indent 4 --arg t "$tone" '.paletteTone = $t' "$flags_file" > "$flags_file.tmp" 2>/dev/null; then
         mv "$flags_file.tmp" "$flags_file"
     else
@@ -3414,11 +3350,11 @@ WP_CMD_NEW = '''        python3 "$(dirname "$0")/wallcolors.py" "$show" "$pic" >
 if mode == "apply":
     edit(wp, WP_VAR_OLD, WP_VAR_NEW, "wallpaper.sh store var", "TONE_STORE=")
     edit(wp, WP_BLOCK_OLD, WP_BLOCK_NEW, "wallpaper.sh load store", "ricelin-wallpaper-tone")
-    edit(wp, '    tone=$(jq -r --arg p "$pic" \'.[$p] // "auto"\' "$TONE_STORE" 2>/dev/null || echo auto)\n'
-            '    [ -n "$tone" ] || tone=auto\n',
-         '    tone=$(jq -r --arg p "$pic" \'.[$p] // "dark"\' "$TONE_STORE" 2>/dev/null || echo dark)\n'
-         '    [ -n "$tone" ] || tone=dark\n',
-         "wallpaper.sh default dark", '.[$p] // "dark"')
+    edit(wp, '    tone=$(jq -r --arg p "$pic" \'.[$p] // "dark"\' "$TONE_STORE" 2>/dev/null || echo dark)\n'
+            '    [ -n "$tone" ] || tone=dark\n',
+         '    tone=$(jq -r --arg p "$pic" \'.[$p] // "auto"\' "$TONE_STORE" 2>/dev/null || echo auto)\n'
+         '    [ -n "$tone" ] || tone=auto\n',
+         "wallpaper.sh default auto", '.[$p] // "auto"')
     edit(wp, WP_CMD_OLD, WP_CMD_NEW, "wallpaper.sh tone key", '"$show" "$pic"')
 else:
     edit(wp, WP_VAR_NEW, WP_VAR_OLD, "wallpaper.sh store var", "@@never@@")
@@ -3433,16 +3369,16 @@ FL_ALIAS_NEW = FL_ALIAS_OLD + '''    property alias paletteTone: adapter.palette
 
 FL_PROP_OLD = '''            property string paletteMode: "static"
 '''
-FL_PROP_NEW = FL_PROP_OLD + '''            /** Dark by default; each wallpaper can still remember its own Light or Dark pick. */
-            property string paletteTone: "dark"
+FL_PROP_NEW = FL_PROP_OLD + '''            /** Auto by default; each wallpaper can still remember its own Light or Dark pick. */
+            property string paletteTone: "auto"
 '''
 
 if mode == "apply":
     edit(flags, FL_ALIAS_OLD, FL_ALIAS_NEW, "Flags.qml alias", "alias paletteTone")
     edit(flags, FL_PROP_OLD, FL_PROP_NEW, "Flags.qml property", 'property string paletteTone')
-    edit(flags, '            property string paletteTone: "auto"\n',
-         '            property string paletteTone: "dark"\n',
-         "Flags.qml default dark", 'property string paletteTone: "dark"')
+    edit(flags, '            property string paletteTone: "dark"\n',
+         '            property string paletteTone: "auto"\n',
+         "Flags.qml default auto", 'property string paletteTone: "auto"')
 else:
     edit(flags, FL_ALIAS_NEW, FL_ALIAS_OLD, "Flags.qml alias", "@@never@@")
     edit(flags, FL_PROP_NEW, FL_PROP_OLD, "Flags.qml property", "@@never@@")
@@ -3450,7 +3386,7 @@ else:
 # --- PillDefaults.js ---------------------------------------------------------
 DF_DEFAULT_OLD = '''    paletteMode: "static",
 '''
-DF_DEFAULT_NEW = DF_DEFAULT_OLD + '''    paletteTone: "dark",
+DF_DEFAULT_NEW = DF_DEFAULT_OLD + '''    paletteTone: "auto",
 '''
 
 DF_APPEAR_OLD = '''var appearanceKeys = ["paletteMode", '''
@@ -3461,8 +3397,8 @@ DF_PRESET_NEW = '''var presetKeys = pillKeys.concat(["paletteMode", "paletteTone
 
 if mode == "apply":
     edit(defaults, DF_DEFAULT_OLD, DF_DEFAULT_NEW, "PillDefaults.js default", 'paletteTone:')
-    edit(defaults, '    paletteTone: "auto",\n', '    paletteTone: "dark",\n',
-         "PillDefaults.js default dark", 'paletteTone: "dark"')
+    edit(defaults, '    paletteTone: "dark",\n', '    paletteTone: "auto",\n',
+         "PillDefaults.js default auto", 'paletteTone: "auto"')
     edit(defaults, DF_APPEAR_OLD, DF_APPEAR_NEW, "PillDefaults.js appearanceKeys", 'var appearanceKeys = ["paletteMode", "paletteTone"')
     edit(defaults, DF_PRESET_OLD, DF_PRESET_NEW, "PillDefaults.js presetKeys", 'var presetKeys = pillKeys.concat(["paletteMode", "paletteTone"')
 else:
@@ -3542,9 +3478,9 @@ printf '%s\n' "$result" | grep -v '^__CHANGED__' || true
 flag_changed=0
 if [ -f "$FLAGSJSON" ]; then
     if [ "$MODE" = apply ] && ! jq -e 'has("paletteTone")' "$FLAGSJSON" >/dev/null 2>&1; then
-        if jq --indent 4 '.paletteTone = "dark"' "$FLAGSJSON" > "$FLAGSJSON.tmp" 2>/dev/null; then
+        if jq --indent 4 '.paletteTone = "auto"' "$FLAGSJSON" > "$FLAGSJSON.tmp" 2>/dev/null; then
             mv "$FLAGSJSON.tmp" "$FLAGSJSON"; flag_changed=1
-            echo "apply: flags.json paletteTone=dark"
+            echo "apply: flags.json paletteTone=auto"
         else
             rm -f "$FLAGSJSON.tmp"
         fi
@@ -6142,9 +6078,9 @@ stage_wallpapers() (
 # The four images live in this repository under wallpapers/. A checkout is
 # copied directly; a standalone installer downloads the same files from the
 # repository's raw URL. The default is written to the live wallpaper state and,
-# when a Hyprland session is up, applied immediately. The palette tone is pinned
-# to dark so a new install starts on the matugen dark scheme instead of deriving
-# Auto from the image.
+# when a Hyprland session is up, applied immediately. Only the 4.jpg default is
+# pinned to the matugen dark scheme; every other wallpaper keeps Auto and
+# derives its tone from the image.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -6190,27 +6126,29 @@ done
     exit 1
 }
 
-# Make 4.jpg the live wallpaper and pin the matugen tone to dark.
+# Make 4.jpg the live wallpaper and pin only its matugen tone to dark.
 [ -s "$FLAGS" ] || printf '{}\n' > "$FLAGS"
 tmp=$(mktemp "$FLAGS.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
-jq --arg dir "$WALLDIR" '.wallpaperDir = $dir | .paletteTone = "dark"' "$FLAGS" > "$tmp"
+jq --arg dir "$WALLDIR" '.wallpaperDir = $dir | .paletteTone = "auto"' "$FLAGS" > "$tmp"
 chmod 0644 "$tmp"
 mv "$tmp" "$FLAGS"
 printf '%s\n' "$DEFAULT" > "$STATEBASE/ricelin-wallpaper"
 
 # Remember the dark choice for 4.jpg as well, so wallpaper.sh does not fall
-# back to Auto after a later wallpaper switch.
+# back to Auto after a later wallpaper switch. The other bundled wallpapers are
+# cleared so they keep following Auto.
 if [ -s "$TONE" ] && jq -e 'type == "object"' "$TONE" >/dev/null 2>&1; then
     tmp=$(mktemp "$TONE.XXXXXX")
-    if jq --arg p "$DEFAULT" '.[$p] = "dark"' "$TONE" > "$tmp" 2>/dev/null; then
+    if jq --arg p "$DEFAULT" \
+        --arg a "$WALLDIR/1.png" --arg b "$WALLDIR/2.jpg" --arg c "$WALLDIR/3.png" \
+        'del(.[$a], .[$b], .[$c]) | .[$p] = "dark"' "$TONE" > "$tmp" 2>/dev/null; then
         chmod 0644 "$tmp"
         mv "$tmp" "$TONE"
     else
         rm -f "$tmp"
     fi
 else
-    printf '{}\n' > "$TONE"
     tmp=$(mktemp "$TONE.XXXXXX")
     jq -n --arg p "$DEFAULT" '{($p): "dark"}' > "$tmp"
     chmod 0644 "$tmp"
@@ -6241,7 +6179,7 @@ if [ -x "$CONFIG/hypr/scripts/wallpaper.sh" ] \
     bash "$CONFIG/hypr/scripts/wallpaper.sh" set "$DEFAULT" all >/dev/null 2>&1 || true
 fi
 
-echo "Wallpapers: 1.png, 2.jpg, 3.png, 4.jpg; default 4.jpg; tone dark."
+echo "Wallpapers: 1.png, 2.jpg, 3.png, 4.jpg; default 4.jpg; 4.jpg tone dark, others auto."
 )
 
 stage_personal_settings() (
@@ -6250,18 +6188,15 @@ stage_personal_settings() (
 # Palette: dynamic (wallpaper colours drive the desktop, not the static washi
 # set). Calendar: Sunday first. Night light: scheduled at 3500 K from 19:00 to
 # 06:00. The app theme and cursor size are already handled by the base/UI
-# stages. These live in flags.json, which is the file the
-# Settings app writes; the matching hyprsunset profile is written too so the
-# night light works before the first Settings visit.
+# stages. These live in flags.json, which is the file the Settings app writes;
+# stage_nightlight_ramp turns them into hyprsunset.conf.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/ricelin"
 FLAGS="$STATE/flags.json"
-SUNSET="$CONFIG/hypr/hyprsunset.conf"
 
-mkdir -p "$STATE" "$CONFIG/hypr"
+mkdir -p "$STATE"
 [ -s "$FLAGS" ] || printf '{}\n' > "$FLAGS"
 command -v jq >/dev/null 2>&1 || { echo "jq is required." >&2; exit 1; }
 
@@ -6276,25 +6211,327 @@ jq '.paletteMode = "dynamic"
 chmod 0644 "$tmp"
 mv "$tmp" "$FLAGS"
 
-cat > "$SUNSET" <<'EOF'
-max-gamma = 150
+echo "SUPER+I: dynamic palette, Sunday week start, scheduled 19:00-06:00 night light."
+)
 
-profile {
-    time = 19:00
-    temperature = 3500
-}
+stage_nightlight_ramp() (
+# Fade the scheduled night light instead of switching at the minute.
+#
+# hyprsunset has no transition setting: a profile applies its whole matrix at
+# its time. This emits one profile per minute through the change, so the screen
+# warms from 6500 K to the chosen temperature over rampMinutes and cools back
+# the same way. A matching change in NightLight.qml keeps the live IPC push on
+# the same curve, so changing a setting mid-fade does not jump to the target.
+#
+# `installer stage --revert` restores the two-profile abrupt schedule.
 
-profile {
-    time = 6:00
-    identity = true
-}
-EOF
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/ricelin"
+QML="$CFG/quickshell/pill/Singletons/NightLight.qml"
+CONF="$CFG/hypr/hyprsunset.conf"
+FLAGS="$STATE/flags.json"
+
+case "${1:-apply}" in
+    --revert|-r|revert) MODE=revert ;;
+    *)                  MODE=apply ;;
+esac
+
+[ -f "$QML" ] || { echo "NightLight.qml not found at $QML" >&2; exit 1; }
+mkdir -p "$(dirname "$CONF")"
+
+python3 - "$QML" "$CONF" "$FLAGS" "$MODE" <<'PY'
+import json
+import os
+import re
+import sys
+
+qml_path, conf_path, flags_path, mode = sys.argv[1:5]
+
+MARK = "// ricelin-nightlight-ramp"
+
+CONST_ANCHOR = r'''    function clampTemp(t) {
+        return Math.max(2200, Math.min(6000, Math.round(t)));
+    }
+'''
+
+CONST_BLOCK = CONST_ANCHOR + r'''
+    // ricelin-nightlight-ramp: fade between cool and warm over a window instead
+    // of switching at the scheduled minute.
+    readonly property int rampMinutes: 5
+    readonly property int neutralTemp: 6500
+
+    function wrapMin(min) {
+        return ((Math.round(min) % 1440) + 1440) % 1440;
+    }
+
+    /** Minutes from the on time to the off time, wrapping past midnight. */
+    function windowLength() {
+        return root.wrapMin(Flags.nightLightOffMin - Flags.nightLightOnMin);
+    }
+
+    /** Keep both ramp ends inside their half of the schedule, even for short windows. */
+    function rampSpan() {
+        var window = root.windowLength();
+        var rest = 1440 - window;
+        var limit = Math.max(1, Math.min(Math.floor(window / 2), Math.floor(rest / 2)) - 1);
+        return Math.min(root.rampMinutes, limit);
+    }
+
+    function profileAt(min, temp) {
+        return "profile {\n    time = " + root.hhmm(root.wrapMin(min))
+            + "\n    temperature = " + Math.round(temp) + "\n}\n\n";
+    }
+
+    function identityAt(min) {
+        return "profile {\n    time = " + root.hhmm(root.wrapMin(min))
+            + "\n    identity = true\n}\n\n";
+    }
+'''
+
+BUILD_OLD = r'''    /** hyprsunset.conf for the current Flags. Off and On are one all-day profile, Scheduled is two. */
+    function buildConf() {
+        var out = "max-gamma = 150\n\n";
+        if (Flags.nightLightMode === "scheduled") {
+            out += "profile {\n    time = " + root.hhmm(Flags.nightLightOnMin)
+                + "\n    temperature = " + root.clampTemp(Flags.nightLightTemp) + "\n}\n\n"
+                + "profile {\n    time = " + root.hhmm(Flags.nightLightOffMin)
+                + "\n    identity = true\n}\n";
+        } else if (Flags.nightLightMode === "on") {
+            out += "profile {\n    time = 0:00\n    temperature = "
+                + root.clampTemp(Flags.nightLightTemp) + "\n}\n";
+        } else {
+            out += "profile {\n    time = 0:00\n    identity = true\n}\n";
+        }
+        return out;
+    }
+'''
+
+BUILD_NEW = r'''    /** hyprsunset.conf for the current Flags. Scheduled mode emits one profile per ramp minute. */
+    function buildConf() {
+        var out = "# Ricelin night-light ramp: " + root.rampMinutes + " minutes\nmax-gamma = 150\n\n";
+        if (Flags.nightLightMode === "scheduled") {
+            var target = root.clampTemp(Flags.nightLightTemp);
+            var span = root.rampSpan();
+            var on = root.wrapMin(Flags.nightLightOnMin);
+            var off = root.wrapMin(Flags.nightLightOffMin);
+            if (root.windowLength() === 0) {
+                out += root.identityAt(0);
+            } else {
+                // Warm up: neutral at the on time, target at on + span.
+                for (var i = 0; i <= span; i++)
+                    out += root.profileAt(on + i, root.neutralTemp + (target - root.neutralTemp) * i / span);
+                // Cool down: one step per minute after off, identity at off + span.
+                for (var j = 1; j < span; j++)
+                    out += root.profileAt(off + j, target + (root.neutralTemp - target) * j / span);
+                out += root.identityAt(off + span);
+            }
+        } else if (Flags.nightLightMode === "on") {
+            out += "profile {\n    time = 0:00\n    temperature = "
+                + root.clampTemp(Flags.nightLightTemp) + "\n}\n";
+        } else {
+            out += "profile {\n    time = 0:00\n    identity = true\n}\n";
+        }
+        return out;
+    }
+'''
+
+CMD_OLD = r'''    /** The IPC command the current mode and clock resolve to. */
+    function desiredCmd() {
+        var warm = Flags.nightLightMode === "on"
+            || (Flags.nightLightMode === "scheduled" && root.windowOpen());
+        return warm
+            ? ["hyprctl", "hyprsunset", "temperature", String(root.clampTemp(Flags.nightLightTemp))]
+            : ["hyprctl", "hyprsunset", "identity"];
+    }
+'''
+
+CMD_NEW = r'''    /** The temperature the schedule resolves to now, or null outside the warm window. */
+    function scheduledTemp() {
+        var target = root.clampTemp(Flags.nightLightTemp);
+        var span = root.rampSpan();
+        var on = root.wrapMin(Flags.nightLightOnMin);
+        var off = root.wrapMin(Flags.nightLightOffMin);
+        var len = root.windowLength();
+        if (len === 0)
+            return null;
+        var pos = root.wrapMin(root.nowMin() - on);
+        if (pos < len) {
+            if (pos <= span)
+                return root.neutralTemp + (target - root.neutralTemp) * pos / span;
+            return target;
+        }
+        var rev = root.wrapMin(root.nowMin() - off);
+        if (rev < span)
+            return target + (root.neutralTemp - target) * rev / span;
+        return null;
+    }
+
+    /** The IPC command the current mode and clock resolve to. */
+    function desiredCmd() {
+        if (Flags.nightLightMode === "on")
+            return ["hyprctl", "hyprsunset", "temperature", String(root.clampTemp(Flags.nightLightTemp))];
+        if (Flags.nightLightMode !== "scheduled")
+            return ["hyprctl", "hyprsunset", "identity"];
+        var temp = root.scheduledTemp();
+        return temp === null
+            ? ["hyprctl", "hyprsunset", "identity"]
+            : ["hyprctl", "hyprsunset", "temperature", String(Math.round(temp))];
+    }
+'''
+
+RAMP_MINUTES = 5
+NEUTRAL = 6500
+DEFAULT_ON = 19 * 60
+DEFAULT_OFF = 6 * 60
+DEFAULT_TEMP = 3500
+
+
+def write_atomic(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode)
+    except OSError:
+        os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def wrap(minute):
+    return minute % 1440
+
+
+def hhmm(minute):
+    minute = wrap(minute)
+    return "%d:%02d" % (minute // 60, minute % 60)
+
+
+def jsround(value):
+    # JavaScript's Math.round rounds .5 up; Python's round() is bankers'.
+    return int(value + 0.5)
+
+
+def profile(minute, temp=None, identity=False):
+    if identity:
+        return "profile {\n    time = %s\n    identity = true\n}\n\n" % hhmm(minute)
+    return "profile {\n    time = %s\n    temperature = %d\n}\n\n" % (hhmm(minute), jsround(temp))
+
+
+def night_light(flags):
+    """Read the night-light flags, clamping anything malformed."""
+    def integer(key, default):
+        try:
+            return int(flags.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return (
+        str(flags.get("nightLightMode", "scheduled")),
+        integer("nightLightOnMin", DEFAULT_ON),
+        integer("nightLightOffMin", DEFAULT_OFF),
+        max(2200, min(6000, integer("nightLightTemp", DEFAULT_TEMP))),
+    )
+
+
+def ramp_span(window):
+    """Mirror NightLight.qml's rampSpan for the on/off window."""
+    return min(RAMP_MINUTES, max(1, min(window // 2, (1440 - window) // 2) - 1))
+
+
+def render_conf(flags):
+    nlmode, on, off, target = night_light(flags)
+
+    out = "# Ricelin night-light ramp: %d minutes\nmax-gamma = 150\n\n" % RAMP_MINUTES
+    if nlmode == "off":
+        return out + profile(0, identity=True)
+    if nlmode == "on":
+        return out + profile(0, temp=target)
+
+    window = wrap(off - on)
+    if window == 0:
+        return out + profile(0, identity=True)
+    span = ramp_span(window)
+    for i in range(span + 1):
+        out += profile(on + i, temp=NEUTRAL + (target - NEUTRAL) * i / span)
+    for j in range(1, span):
+        out += profile(off + j, temp=target + (NEUTRAL - target) * j / span)
+    return out + profile(off + span, identity=True)
+
+
+def render_abrupt(flags):
+    _, on, off, target = night_light(flags)
+    return (
+        "max-gamma = 150\n\n"
+        "profile {\n    time = %s\n    temperature = %d\n}\n\n"
+        "profile {\n    time = %s\n    identity = true\n}\n"
+    ) % (hhmm(on), target, hhmm(off))
+
+
+try:
+    with open(flags_path, encoding="utf-8") as fh:
+        flags = json.load(fh)
+    if not isinstance(flags, dict):
+        flags = {}
+except (OSError, ValueError):
+    flags = {}
+
+with open(qml_path, encoding="utf-8") as fh:
+    text = fh.read()
+
+if mode == "apply":
+    if MARK in text:
+        if BUILD_NEW not in text or CMD_NEW not in text:
+            sys.exit("NightLight.qml has a partial ramp patch; refusing to patch")
+        updated = re.sub(r'(readonly property int rampMinutes:\s*)\d+', r'\g<1>%d' % RAMP_MINUTES, text)
+        if updated != text:
+            write_atomic(qml_path, updated)
+            print("NightLight.qml: ramp duration set to %d minutes" % RAMP_MINUTES)
+        else:
+            print("NightLight.qml: ramp already applied")
+    else:
+        for block in (CONST_ANCHOR, BUILD_OLD, CMD_OLD):
+            if block not in text:
+                sys.exit("NightLight.qml anchors moved; refusing to patch")
+        text = text.replace(CONST_ANCHOR, CONST_BLOCK, 1)
+        text = text.replace(BUILD_OLD, BUILD_NEW, 1)
+        text = text.replace(CMD_OLD, CMD_NEW, 1)
+        write_atomic(qml_path, text)
+        print("NightLight.qml: ramp applied")
+    conf = render_conf(flags)
+else:
+    if MARK not in text:
+        print("NightLight.qml: ramp not present")
+    else:
+        text = re.sub(r'(readonly property int rampMinutes:\s*)\d+', r'\g<1>%d' % RAMP_MINUTES, text)
+        for block in (CONST_BLOCK, BUILD_NEW, CMD_NEW):
+            if block not in text:
+                sys.exit("NightLight.qml patch is not in the expected shape; refusing to revert")
+        text = text.replace(CONST_BLOCK, CONST_ANCHOR, 1)
+        text = text.replace(BUILD_NEW, BUILD_OLD, 1)
+        text = text.replace(CMD_NEW, CMD_OLD, 1)
+        write_atomic(qml_path, text)
+        print("NightLight.qml: ramp removed")
+    conf = render_abrupt(flags)
+
+write_atomic(conf_path, conf)
+print("hyprsunset.conf: %s" % ("%d-minute fade" % RAMP_MINUTES if mode == "apply" else "abrupt schedule restored"))
+PY
 
 if systemctl --user is-active --quiet hyprsunset.service 2>/dev/null; then
     systemctl --user restart hyprsunset.service >/dev/null 2>&1 || true
 fi
 
-echo "SUPER+I: dynamic palette, Sunday week start, 19:00-06:00 night light at 3500 K."
+# Load the new/restored NightLight.qml in a running session; the daemon ramp
+# works even if no shell is up.
+if [ -x "$CFG/hypr/scripts/ricelin" ] && command -v qs >/dev/null 2>&1 \
+    && qs -c pill ipc show >/dev/null 2>&1; then
+    "$CFG/hypr/scripts/ricelin" restart pill >/dev/null 2>&1 || true
+fi
+
+echo "Night light: $([ "$MODE" = apply ] && echo '5-minute fade in and out' || echo 'abrupt schedule restored')."
 )
 
 stage_display_mode() (

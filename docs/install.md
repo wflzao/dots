@@ -7,19 +7,19 @@ re-run safely.
 
 - Installs SDDM, the Thunar stack, Zen Browser, OpenCode and NVIDIA tools.
 - Installs Hermes Agent and builds Hermes Desktop through the official
-  bootstrap, then applies the wizard choices without the interactive wizard:
-  OpenCode Go, `deepseek-v4.1-flash`, high reasoning, local terminal and
-  browser, Exa free search, a curated CLI toolset, the gateway user service and
-  telemetry off.
+  bootstrap and runs Hermes's own interactive setup wizard. The provider,
+  model, API key, tools, gateway and telemetry choices are made in that wizard;
+  the installer does not preselect them.
 - Clones or updates Ricelin in `~/.local/share/ricelin` and runs
   `install.sh --quickstart --sddm`.
 - Installs and themes SDDM with the palette-driven torii/ricelin theme.
 - Copies the live SUPER+I choices that differ from stock: dynamic palette,
-  Sunday week start, and a scheduled 3500 K night light from 19:00 to 06:00.
+  Sunday week start, and a scheduled 3500 K night light from 19:00 to 06:00
+  that fades in and out over 5 minutes.
 - Moves wallpapers from `~/Ricelin/wallpapers` to
   `~/.config/ricelin/wallpapers`, updates the saved paths, installs the bundled
   `1.png`, `2.jpg`, `3.png` and `4.jpg` set, and makes `4.jpg` the default with
-  the matugen palette tone set to Dark.
+  its matugen palette tone set to Dark; the other wallpapers stay on Auto.
 - Pins each active monitor to its native resolution and highest refresh rate.
 - Rebuilds the terminal's 16 ANSI colours with readable, conventional hues and
   a clear selection highlight; fixes KDE selection text and active colours.
@@ -40,7 +40,7 @@ re-run safely.
 | Disk | 3 GiB free under `$HOME` minimum, 8 GiB recommended with Hermes Desktop |
 | Commands | `git`, `curl`, `python3`, `jq`, `systemctl`, `timeout` |
 | GPU | Optional NVIDIA; fan and vibrance stages skip without one |
-| Hermes key | `OPENCODE_GO_API_KEY`, or paste it at the hidden install prompt |
+| Hermes setup | Interactive wizard during install; choose your provider and key there |
 
 On a minimal Arch install:
 
@@ -113,12 +113,13 @@ start so the privileged phases do not prompt repeatedly.
 - Restart Zen once if it was already running.
 - Reboot to land on SDDM.
 - The bundled wallpapers are in `~/.config/ricelin/wallpapers`; `4.jpg` is the
-  default and the palette tone is Dark. Change the wallpaper from the strip or
-  SUPER+B, and the tone from SUPER+I > Appearance > Palette (Auto is still
-  available per wallpaper).
+  default with its tone pinned to Dark, while the other wallpapers use Auto.
+  Change the wallpaper from the strip or SUPER+B, and the tone from
+  SUPER+I > Appearance > Palette; the choice is remembered per wallpaper.
 - Hermes is available as `hermes` and from the **Hermes** desktop launcher.
-  If no key was supplied, add it later with
-  `hermes config set OPENCODE_GO_API_KEY <key>` and restart the gateway with
+  The installer runs Hermes's own setup wizard; if you skipped the key there,
+  add it later with `hermes config set OPENCODE_GO_API_KEY <key>` (or the key
+  for the provider you chose) and restart the gateway with
   `hermes gateway restart`.
 - After `ricelin update`, re-apply the customisation layer:
 
