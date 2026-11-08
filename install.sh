@@ -1578,13 +1578,22 @@ cat > "$tmp" <<'CSS'
   background: transparent !important;
 }
 
-/* Tab tooltips: a flat dialog-toned bubble, not a black one. */
+/* Tab and content tooltips: a flat dialog-toned bubble, not a black one.
+ *
+ * The native tooltip appearance already paints a rounded shape, so a
+ * rectangular border on top of it gets clipped at each corner (the outline
+ * vanishes there). Drop the native appearance and draw the rounded surface
+ * and its border together so the outline follows the radius. */
 tooltip,
 #tabbrowser-tab-tooltip,
 .tooltip {
+  appearance: none !important;
+  -moz-default-appearance: none !important;
   color: -moz-dialogtext !important;
   background-color: -moz-dialog !important;
   border: 1px solid color-mix(in srgb, -moz-dialogtext 22%, -moz-dialog) !important;
+  border-radius: 8px !important;
+  overflow: clip !important;
 }
 
 /* Right-click menus. Three separate mistakes made these look foreign:
