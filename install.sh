@@ -16,8 +16,8 @@
 #      the base installer left no helper behind. Hermes Agent and its Electron
 #      Desktop are installed next with their own interactive setup wizard; the
 #      installer does not preselect providers, models, keys or tools during
-#      setup. A later stage routes DeepSeek V4.1 Flash between OpenCode's free
-#      model and OpenCode Go.
+#      setup. A later stage blocks paid OpenCode Go during DeepSeek's peak
+#      pricing windows in both OpenCode and Hermes.
 #   4. The requested SDDM order: install the package, create
 #      /etc/sddm.conf.d, then run the upstream torii theme installer at its
 #      real path, configs/sddm/themes/torii/install.sh. (The old guessed path
@@ -25,7 +25,7 @@
 #   5. The tested Ricelin customisation stages, grouped by dependency:
 #        system handover -> updater guard -> SDDM palette/greeter ->
 #        fans/vibrance -> wallpaper folder -> personal settings/Hermes/agent
-#        activity/model routing -> night-light fade/display -> palette/terminal
+#        activity/peak guard -> night-light fade/display -> palette/terminal
 #        -> fish -> Thunar/polkit -> lock screen -> wallpaper strip ->
 #        menus/glass/VRR -> game mode -> screenshots/UI tweaks -> Discord
 #        workspace/rishot removal -> clipboard scrolling -> logout.
@@ -238,7 +238,9 @@ run_step() {
 }
 
 # Like run_step, but keeps long-running output visible. Used by Hermes: the
-# desktop build takes minutes and its own setup wizard needs the terminal.
+# desktop build takes minutes. Its curses setup wizard needs a real terminal,
+# so install_hermes runs the bootstrap under script(1) when this helper pipes
+# stdout through tee.
 run_step_stream() {
     local label=$1; shift
     STEP=$((STEP + 1))
@@ -570,7 +572,15 @@ if [ -x "$HOME/.local/bin/hermes" ] && { [ -x "$desktop" ] || [ -f "$launcher" ]
     exit 0
 fi
 
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --include-desktop
+if command -v script >/dev/null 2>&1; then
+    # run_step_stream pipes stdout through tee, so the curses setup wizard would
+    # see a pipe and fall back to numbered text input. script(1) gives the
+    # bootstrap a real PTY on stdin/stdout while the outer tee still logs it.
+    script -qec 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --include-desktop' /dev/null
+else
+    printf 'Hermes: script(1) not found; the setup wizard may render poorly.\n' >&2
+    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --include-desktop
+fi
 )
 
 install_sddm() {
@@ -1064,28 +1074,19 @@ PY
     fi
     if [ -f "$HOME/.local/lib/peakguard.py" ] \
         && [ -x "$HOME/.local/bin/peak-guard" ] \
-        && [ -x "$HOME/.local/bin/ricelin-model-route" ] \
         && [ -f "$HOME/.hermes/plugins/peak-guard/plugin.yaml" ] \
         && [ -f "$HOME/.config/opencode/plugins/peak-guard/index.ts" ]; then
-        if systemctl --user is-enabled --quiet ricelin-model-route.timer 2>/dev/null; then
-            if systemctl --user is-active --quiet ricelin-model-route.timer 2>/dev/null; then
-                ui_ok "Model routing: free first, Go off-peak, peak enforced (timer active)"
-            else
-                ui_warn "Model routing: timer enabled but not active"
-            fi
+        ui_ok "Peak guard: Go blocked Mon-Fri 01-04 and 06-10 UTC"
+        if grep -qE '"model"[[:space:]]*:[[:space:]]*"opencode-go/deepseek-v4\.1-flash"' \
+                "$HOME/.config/opencode/opencode.json" 2>/dev/null \
+            && grep -qE '^  default: "deepseek-v4\.1-flash"' "$HOME/.hermes/config.yaml" 2>/dev/null \
+            && grep -qE '^  provider: "opencode-go"' "$HOME/.hermes/config.yaml" 2>/dev/null; then
+            ui_ok "Models: OpenCode and Hermes pinned to DeepSeek V4.1 Flash (Go)"
         else
-            ui_warn "Model routing: timer not enabled"
-        fi
-        if grep -qE '"model": "(opencode|opencode-go)/deepseek-v4\.1-flash' \
-            "$HOME/.config/opencode/opencode.json" 2>/dev/null \
-            && grep -qE '^  default: "deepseek-v4\.1-flash(-free)?"' \
-            "$HOME/.hermes/config.yaml" 2>/dev/null; then
-            ui_ok "Model routing: OpenCode and Hermes point at DeepSeek V4.1 Flash"
-        else
-            ui_warn "Model routing: one config is missing the DeepSeek model"
+            ui_warn "Models: OpenCode or Hermes is not pinned to OpenCode Go"
         fi
     else
-        ui_warn "Model routing: peak-guard, router or plugin missing"
+        ui_warn "Peak guard: helper or plugin missing"
     fi
     if grep -q 'XCURSOR_SIZE.*12' "$HOME/.config/hypr/modules/env.lua" 2>/dev/null \
         && grep -q 'XCURSOR_THEME.*Bibata-Modern-Ice' "$HOME/.config/hypr/modules/env.lua" 2>/dev/null; then
@@ -1253,7 +1254,7 @@ main() {
     run_step "Hermes desktop integration" stage_hermes_skin
     run_step "Hermes desktop log quieting" stage_hermes_logs
     run_step "AI agent pill activity" stage_agent_activity
-    run_step "Model routing (free first, Go off-peak)" stage_model_route
+    run_step "Peak guard (Go blocked 01-04, 06-10 UTC)" stage_peak_guard
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
     run_step "KDE/Qt + fish palette" stage_kde_fish_palette
@@ -8337,18 +8338,16 @@ else:
 PY
 )
 
-# ---------------------------------------------------------------- stage_model_route
-stage_model_route() (
-# Keep DeepSeek V4.1 Flash on the free OpenCode model whenever possible, and
-# hard-block paid OpenCode Go during peak pricing.
+# ---------------------------------------------------------------- stage_peak_guard
+stage_peak_guard() (
+# Block paid OpenCode Go during DeepSeek's peak-pricing windows in OpenCode
+# and Hermes. There is no automatic model switching: both tools are pinned
+# once to opencode-go/deepseek-v4.1-flash below.
 #
 # DeepSeek bills the V4 models at twice the off-peak rate from 01:00-04:00 and
 # 06:00-10:00 UTC, Monday to Friday; OpenCode Go resells the same models at the
-# same rates. OpenCode's free DeepSeek model is preferred:
-#
-#   free available              -> free
-#   free exhausted, off-peak    -> Go
-#   free exhausted, peak        -> free is attempted; paid Go is blocked
+# same rates. The guard refuses paid Go requests in those windows. The free
+# OpenCode model is still allowed when selected by hand.
 #
 # Three pieces share one schedule module (peakguard.py):
 #
@@ -8358,36 +8357,29 @@ stage_model_route() (
 #       peak rates.
 #   ~/.hermes/plugins/peak-guard/
 #       pre_llm_call returns {"action": "block"} before any inference request
-#       when paid Go is selected during peak or the free quota is exhausted.
-#       api_request_error records a free-quota failure so the router can switch.
+#       when paid Go is selected during peak.
 #   ~/.config/opencode/plugins/peak-guard/
-#       prompt blocks an exhausted-free peak turn before admission, and a
-#       model.request hook scoped to opencode-go blocks paid Go during peak.
-#   ~/.local/bin/ricelin-model-route
-#       rewrites the OpenCode/Hermes model choice at the peak boundaries and
-#       after a free-quota failure, updates OpenCode sessions and reloads it.
+#       a model.request hook scoped to opencode-go blocks paid Go during peak.
 #
-# Everything is idempotent. A direct --revert stops the timer, removes the
-# helper/plugins and restores the config files captured on first apply.
+# Fresh-install stage: it writes the guard, pins the two configs and enables
+# the plugins. There is no revert or migration path.
 set -eu
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 LOCAL_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 STATE_BASE="${XDG_STATE_HOME:-$HOME/.local/state}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-ROUTER="$LOCAL_BIN/ricelin-model-route"
 GUARD="$LOCAL_BIN/peak-guard"
 MODULE="$HOME/.local/lib/peakguard.py"
 GUARD_CONF="$CONFIG/ricelin/peakguard.conf"
-UNIT_DIR="$CONFIG/systemd/user"
-STATE="$STATE_BASE/ricelin/model-route"
-BACKUP="$STATE/backup"
+STATE="$STATE_BASE/ricelin"
 OC_CONFIG="$CONFIG/opencode/opencode.json"
 OC_PLUGIN="$CONFIG/opencode/plugins/peak-guard"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_PLUGIN="$HERMES_HOME/plugins/peak-guard"
-OLD_HERMES_PLUGIN="$HERMES_HOME/plugins/ricelin-model-route"
+
+PATH="$LOCAL_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
 
 hermes_bin() {
     local bin
@@ -8415,65 +8407,10 @@ client.recv(65536)
 PY
 }
 
-case "${1:-apply}" in
-    --revert|-r|revert) MODE=revert ;;
-    *)                  MODE=apply ;;
-esac
+mkdir -p "$LOCAL_BIN" "$HOME/.local/lib" "$STATE" "$CONFIG/ricelin" \
+         "$(dirname "$OC_CONFIG")" "$OC_PLUGIN" "$HERMES_PLUGIN"
+chmod 700 "$STATE" 2>/dev/null || true
 
-if [ "$MODE" = revert ]; then
-    systemctl --user disable --now ricelin-model-route.timer >/dev/null 2>&1 || true
-    systemctl --user stop ricelin-model-route.service >/dev/null 2>&1 || true
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-
-    hermes=$(hermes_bin)
-    if [ -n "$hermes" ]; then
-        "$hermes" plugins disable peak-guard >/dev/null 2>&1 || true
-        "$hermes" plugins disable ricelin-model-route >/dev/null 2>&1 || true
-    fi
-
-    rm -f "$ROUTER" "$GUARD" "$MODULE" \
-          "$UNIT_DIR/ricelin-model-route.service" "$UNIT_DIR/ricelin-model-route.timer"
-    rm -rf "$HERMES_PLUGIN" "$OLD_HERMES_PLUGIN" "$OC_PLUGIN"
-
-    if [ -f "$BACKUP/config.yaml" ]; then
-        cp -a "$BACKUP/config.yaml" "$HERMES_CONFIG"
-    fi
-    if [ -f "$BACKUP/opencode.json" ]; then
-        cp -a "$BACKUP/opencode.json" "$OC_CONFIG"
-    elif [ -f "$BACKUP/opencode.absent" ]; then
-        rm -f "$OC_CONFIG"
-    fi
-    rm -f "$STATE_BASE/ricelin/peak.override" "$STATE_BASE/ricelin/model-route/free-exhausted-at"
-    rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/ricelin/peak.log"
-    rm -rf "$HOME/.local/lib/__pycache__"
-    if [ -d "$STATE" ]; then
-        find "$STATE" -mindepth 1 -maxdepth 1 ! -name backup -exec rm -rf {} + 2>/dev/null || true
-    fi
-
-    echo "Model routing: timer, guard, helper and plugins removed; configs restored"
-    exit 0
-fi
-
-mkdir -p "$LOCAL_BIN" "$HOME/.local/lib" "$UNIT_DIR" "$STATE/backup" \
-         "$(dirname "$OC_CONFIG")" "$OC_PLUGIN" "$HERMES_PLUGIN" "$(dirname "$GUARD_CONF")"
-
-# Capture the untouched config once. Re-running the installer must not turn the
-# already-routed file into the new backup.
-if [ ! -f "$BACKUP/config.yaml" ] && [ -f "$HERMES_CONFIG" ]; then
-    cp -a "$HERMES_CONFIG" "$BACKUP/config.yaml"
-fi
-if [ ! -f "$BACKUP/opencode.json" ] && [ ! -f "$BACKUP/opencode.absent" ]; then
-    if [ -f "$OC_CONFIG" ]; then
-        cp -a "$OC_CONFIG" "$BACKUP/opencode.json"
-    else
-        : > "$BACKUP/opencode.absent"
-    fi
-fi
-chmod 700 "$STATE" "$BACKUP" 2>/dev/null || true
-
-# OpenCode Go's documented peak windows have no holiday exception. DeepSeek's
-# own API does exclude Chinese public holidays, so the calendar is available but
-# off by default; set holidays=on to follow DeepSeek's public pricing.
 if [ ! -f "$GUARD_CONF" ]; then
     write_atomic "$GUARD_CONF" 0644 <<'GUARD_CONF'
 # peakguard: DeepSeek V4 / OpenCode Go peak pricing
@@ -8485,16 +8422,14 @@ GUARD_CONF
 fi
 
 write_atomic "$MODULE" 0644 <<'PEAKGUARD_PY'
-"""Peak-pricing gate and free/paid route for DeepSeek V4.1 Flash.
+"""Peak-pricing gate for DeepSeek V4 / OpenCode Go.
 
 DeepSeek bills the V4 models at twice the off-peak rate from 01:00-04:00 and
 06:00-10:00 UTC, Monday through Friday; OpenCode Go resells the same models at
-the same rates. OpenCode's free DeepSeek model is preferred whenever its daily
-allowance is available.
+the same rates.
 
-This module is the single source of the schedule and the route. The
-``peak-guard`` CLI, the Hermes plugin, the OpenCode plugin and the model router
-all read it.
+This module is the single source of the schedule and the block message. The
+``peak-guard`` CLI, the Hermes plugin and the OpenCode plugin all read it.
 
 Holiday pricing: DeepSeek's own API excludes Chinese public holidays; the
 OpenCode Go docs and the models.dev cost data only specify the weekday windows.
@@ -8512,9 +8447,6 @@ from pathlib import Path
 
 UTC = dt.timezone.utc
 WINDOWS = ((1, 4), (6, 10))
-FREE_MODEL = "deepseek-v4.1-flash-free"
-PAID_MODEL = "deepseek-v4.1-flash"
-FREE_CONTEXT = 200000
 
 HOME = Path.home()
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or (HOME / ".config"))
@@ -8523,16 +8455,7 @@ CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME") or (HOME / ".cache"))
 CONFIG = CONFIG_HOME / "ricelin" / "peakguard.conf"
 STATE = STATE_HOME / "ricelin"
 OVERRIDE = STATE / "peak.override"
-FREE_EXHAUSTED = STATE / "model-route" / "free-exhausted-at"
 LOG = CACHE_HOME / "ricelin" / "peak.log"
-
-FREE_ERROR_MARKERS = (
-    "free usage limit",
-    "free usage exceeded",
-    "freeusagelimiterror",
-    "free models work in opencode",
-    "today's free messages",
-)
 
 # State Council notice 国办发明电〔2025〕7号 (2025-11-04), 2026 public holidays.
 # Only used when holidays=on; Go's documented pricing does not mention them.
@@ -8549,17 +8472,33 @@ HOLIDAYS = {
 }
 
 _holiday_cache: dict[int, frozenset[dt.date]] = {}
+_config_cache: tuple[tuple[int, int], dict[str, str]] | None = None
+
+
+def _config() -> dict[str, str]:
+    """Parse the config once per (mtime, size) pair."""
+    global _config_cache
+    try:
+        stat = CONFIG.stat()
+    except OSError:
+        return {}
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    if _config_cache is not None and _config_cache[0] == stamp:
+        return _config_cache[1]
+    values: dict[str, str] = {}
+    try:
+        for line in CONFIG.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key.strip().lower()] = value.strip().lower()
+    except OSError:
+        pass
+    _config_cache = (stamp, values)
+    return values
 
 
 def _setting(name: str) -> str:
-    try:
-        for line in CONFIG.read_text(encoding="utf-8").splitlines():
-            key, _, value = line.partition("=")
-            if key.strip().lower() == name:
-                return value.strip().lower()
-    except OSError:
-        pass
-    return ""
+    return _config().get(name, "")
 
 
 def holidays_enabled() -> bool:
@@ -8617,77 +8556,15 @@ def override_until() -> dt.datetime | None:
     """The override's expiry, when one is armed and still in the future."""
     try:
         stamp = float(OVERRIDE.read_text().strip())
-    except Exception:
+    except (OSError, ValueError):
         return None
     if stamp <= time.time():
         return None
     return dt.datetime.fromtimestamp(stamp, UTC)
 
 
-def free_exhausted(now: dt.datetime | None = None) -> bool:
-    """True when the free bucket was exhausted during the current UTC day."""
-    moment = now or dt.datetime.now(UTC)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    moment = moment.astimezone(UTC)
-    try:
-        stamp = float(FREE_EXHAUSTED.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-    if stamp <= 0:
-        return False
-    marker = dt.datetime.fromtimestamp(stamp, UTC)
-    if marker.date() == moment.date():
-        return True
-    clear_free_exhausted()
-    return False
-
-
-def free_exhausted_at(now: dt.datetime | None = None) -> int:
-    """The exhaustion epoch, or 0 when it is absent or stale."""
-    if not free_exhausted(now):
-        return 0
-    try:
-        return int(float(FREE_EXHAUSTED.read_text(encoding="utf-8").strip()))
-    except (OSError, ValueError):
-        return 0
-
-
-def mark_free_exhausted(now: dt.datetime | None = None) -> None:
-    moment = now or dt.datetime.now(UTC)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    moment = moment.astimezone(UTC)
-    try:
-        FREE_EXHAUSTED.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = FREE_EXHAUSTED.with_name(FREE_EXHAUSTED.name + ".tmp")
-        temporary.write_text(str(int(moment.timestamp())) + "\n", encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, FREE_EXHAUSTED)
-    except OSError:
-        pass
-
-
-def clear_free_exhausted() -> None:
-    try:
-        FREE_EXHAUSTED.unlink()
-    except OSError:
-        pass
-
-
-def free_reset(now: dt.datetime | None = None) -> dt.datetime:
-    """The next 00:00 UTC: the free bucket resets on the UTC day boundary."""
-    moment = now or dt.datetime.now(UTC)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    moment = moment.astimezone(UTC)
-    return (moment + dt.timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-
-
 def state(now: dt.datetime | None = None) -> dict:
-    """The gate's whole answer: schedule, free allowance and the route."""
+    """The gate's whole answer: schedule and override."""
     moment = now or dt.datetime.now(UTC)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
@@ -8699,19 +8576,17 @@ def state(now: dt.datetime | None = None) -> dict:
     override = override_until()
     forced = os.environ.get("PEAK_GUARD", "").strip().lower()
 
-    if forced in {"off", "0", "false", "no"}:
-        peak, reason = False, "PEAK_GUARD=off"
-    elif forced in {"peak", "on", "1", "true", "yes"}:
-        peak, reason = True, "PEAK_GUARD=peak"
-    elif scheduled and override is not None:
-        # Only ever opens the gate: an allow cannot make a peak hour cost less.
-        peak, reason = False, "override"
+    forced_off = forced in {"off", "0", "false", "no"}
+    forced_peak = forced in {"peak", "on", "1", "true", "yes"}
 
-    exhausted = free_exhausted(moment)
-    if exhausted:
-        route = "blocked" if peak else "paid"
-    else:
-        route = "free"
+    if forced_off:
+        peak, reason = False, "PEAK_GUARD=off"
+    elif override is not None and (scheduled or forced_peak):
+        # Only ever opens the gate: an allow cannot make a peak hour cost less.
+        # The deliberate door also wins over the PEAK_GUARD testing knob.
+        peak, reason = False, "override"
+    elif forced_peak:
+        peak, reason = True, "PEAK_GUARD=peak"
 
     change = _next_change(moment)
     return {
@@ -8724,14 +8599,7 @@ def state(now: dt.datetime | None = None) -> dict:
         "override_until": override,
         "holiday_calendar": moment.year in HOLIDAYS,
         "holidays": holidays_enabled(),
-        "free_exhausted": exhausted,
-        "free_reset": free_reset(moment) if exhausted else None,
-        "route": route,
     }
-
-
-def route(now: dt.datetime | None = None) -> str:
-    return state(now)["route"]
 
 
 def local_label(moment: dt.datetime) -> str:
@@ -8747,11 +8615,6 @@ def utc_label(moment: dt.datetime) -> str:
 
 def notice(s: dict) -> str:
     """The notification body: the toast clips a paragraph, so this is one line."""
-    if s["route"] == "blocked":
-        return (
-            f"Free quota exhausted until {local_label(s['free_reset'])}. "
-            "Paid Go is blocked during peak."
-        )
     if s["peak_end"] is not None:
         return f"2× rates until {local_label(s['peak_end'])}. No paid request was sent."
     return "2× rates are active. No paid request was sent."
@@ -8772,34 +8635,16 @@ def _paid_block_text(s: dict) -> str:
 
 
 def block_message(s: dict, model: str = "") -> str:
-    """The message a hook returns when a turn or model request must be refused."""
+    """The message a hook returns when a paid request must be refused."""
     if not s["peak"]:
         return ""
     name = (model or "").lower()
     if "-free" in name:
-        if not s["free_exhausted"]:
-            return ""
-        return (
-            "The free OpenCode quota is exhausted and resets at "
-            f"{local_label(s['free_reset'])}. Paid OpenCode Go is blocked "
-            f"during peak pricing ({_end_label(s)}). "
-            "`peak-guard allow 30m` overrides."
-        )
+        return ""
     # Leave a deliberately different provider (Anthropic, local, ...) alone.
     if name and "deepseek-v4.1-flash" not in name:
         return ""
     return _paid_block_text(s)
-
-
-def blocked_message(s: dict) -> str:
-    """The message for a peak turn when the free bucket is already exhausted."""
-    if s["route"] != "blocked":
-        return ""
-    return (
-        "The free OpenCode quota is exhausted and resets at "
-        f"{local_label(s['free_reset'])}. Paid OpenCode Go is blocked during "
-        f"peak pricing ({_end_label(s)}). `peak-guard allow 30m` overrides."
-    )
 
 
 def paid_blocked_message(s: dict) -> str:
@@ -8821,18 +8666,14 @@ def as_json(s: dict) -> dict:
         "scheduled": s["scheduled"],
         "reason": s["reason"],
         "now": _iso(s["now"]),
-        "until": _iso(s["peak_end"]),
+        "until": _iso(s["peak_end"]) if s["peak"] else None,
         "next_start": _iso(s["next_start"]),
         "override_until": _iso(s["override_until"]),
         "holiday_calendar": s["holiday_calendar"],
         "holidays": s["holidays"],
         "tz": s["now"].astimezone().tzname(),
-        "route": s["route"],
-        "free_exhausted": s["free_exhausted"],
-        "free_reset": _iso(s["free_reset"]),
-        "blocked": blocked_message(s),
         "paid_blocked": paid_blocked_message(s),
-        "notice": notice(s) if s["peak"] or s["route"] == "blocked" else "",
+        "notice": notice(s) if s["peak"] else "",
     }
 
 
@@ -8844,10 +8685,10 @@ def record(source: str, session: str = "") -> None:
         with LOG.open("a", encoding="utf-8") as fh:
             fh.write(
                 f"{_iso(dt.datetime.now(UTC))}\t{source}\t{session or '-'}\t"
-                f"{s['route']}\t{'peak' if s['peak'] else 'off'}\t"
+                f"{'peak' if s['peak'] else 'off'}\t"
                 f"{_iso(s['peak_end']) or '-'}\n"
             )
-    except Exception:
+    except OSError:
         pass
 
 
@@ -8859,9 +8700,9 @@ write_atomic "$GUARD" 0755 <<'PEAKGUARD_CLI'
 #!/usr/bin/env python3
 """peak-guard — the door to the DeepSeek / OpenCode Go peak-pricing schedule.
 
-  peak-guard                 where the rate and the free/paid route stand
+  peak-guard                 where the rate and the paid-Go gate stand
   peak-guard status --json   the same, machine-readable
-  peak-guard check           exit 0 when the free/paid route is usable, 75 when blocked
+  peak-guard check           exit 0 off-peak, 75 during peak (paid Go blocked)
   peak-guard allow [30m]     open the gate for a while (expiring override)
   peak-guard deny            drop the override
   peak-guard record S [ID]   append a block to ~/.cache/ricelin/peak.log
@@ -8872,6 +8713,7 @@ write_atomic "$GUARD" 0755 <<'PEAKGUARD_CLI'
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sys
 import time
 from pathlib import Path
@@ -8887,7 +8729,7 @@ DIM = "\033[38;2;138;125;116m"
 FAINT = "\033[38;2;111;99;91m"
 RST = "\033[0m"
 
-if not (sys.stdout.isatty() and not __import__("os").environ.get("NO_COLOR")):
+if not (sys.stdout.isatty() and not os.environ.get("NO_COLOR")):
     VERM = FLAME = CREAM = DIM = FAINT = RST = ""
 
 
@@ -8897,11 +8739,17 @@ def parse_at(value: str) -> dt.datetime:
 
 def parse_span(value: str) -> float:
     """'30m', '2h', '45s', '1d' or a bare number of minutes."""
-    value = value.strip().lower()
+    value = value.strip().lower() or "30m"
     scale = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    if value and value[-1] in scale:
-        return float(value[:-1]) * scale[value[-1]]
-    return float(value) * 60 if value else 1800.0
+    unit = value[-1] if value[-1] in scale else "m"
+    number = value[:-1] if value[-1] in scale else value
+    try:
+        seconds = float(number) * scale[unit]
+    except ValueError:
+        raise SystemExit(f"peak-guard: bad duration {value!r}") from None
+    if seconds <= 0:
+        raise SystemExit("peak-guard: duration must be positive")
+    return seconds
 
 
 def human(s: dict) -> str:
@@ -8927,18 +8775,17 @@ def human(s: dict) -> str:
             )
         head = f"{DIM}▫{RST} {CREAM}off-peak{RST}{starts}"
 
-    route = {
-        "free": f"{CREAM}free{RST} {DIM}· DeepSeek V4.1 Flash Free{RST}",
-        "paid": f"{FLAME}paid{RST} {DIM}· OpenCode Go{RST}",
-        "blocked": f"{VERM}blocked{RST} {DIM}· free exhausted, Go refused{RST}",
-    }[s["route"]]
-    line = f"  {head}\n  {FAINT}▏{RST}  {route}"
-    if s["free_exhausted"] and s["free_reset"] is not None:
-        line += f" {DIM}· free resets{RST} {CREAM}{peakguard.local_label(s['free_reset'])}{RST}"
-    note = "Mon–Fri 01–04, 06–10 UTC · CN holidays " + ("on" if s["holidays"] else "off")
+    gate = "blocked" if s["peak"] else "allowed"
+    note = "Mon–Fri 01–04, 06–10 UTC · CN holidays " + (
+        "on" if s["holidays"] else "off"
+    )
     if not s["holiday_calendar"]:
         note += " · calendar not published for this year"
-    return f"{line}\n  {FAINT}▏{RST}  {DIM}{note}{RST}"
+    return (
+        f"  {head}\n"
+        f"  {FAINT}▏{RST}  {DIM}OpenCode Go: {gate}{RST}\n"
+        f"  {FAINT}▏{RST}  {DIM}{note}{RST}"
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -8946,9 +8793,12 @@ def main(argv: list[str]) -> int:
     at = None
     if "--at" in args:
         index = args.index("--at")
+        if index + 1 >= len(args):
+            print("peak-guard: --at needs an ISO-8601 timestamp", file=sys.stderr)
+            return 2
         try:
             at = parse_at(args[index + 1])
-        except Exception as exc:
+        except ValueError as exc:
             print(f"peak-guard: bad --at value: {exc}", file=sys.stderr)
             return 2
         del args[index:index + 2]
@@ -8964,19 +8814,27 @@ def main(argv: list[str]) -> int:
 
     if command == "check":
         s = peakguard.state(at)
-        if s["route"] == "blocked":
-            print(peakguard.blocked_message(s), file=sys.stderr)
+        if s["peak"]:
+            print(peakguard.paid_blocked_message(s), file=sys.stderr)
             return 75
         return 0
 
     if command == "allow":
         seconds = parse_span(rest[0] if rest else "30m")
         expiry = time.time() + seconds
+        before = peakguard.state()
         peakguard.OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
         peakguard.OVERRIDE.write_text(f"{expiry:.0f}\n")
         until = dt.datetime.fromtimestamp(expiry, peakguard.UTC)
-        s = peakguard.state()
-        tail = "2× resumes after that" if s["scheduled"] else "off-peak anyway"
+        tail = (
+            "2× resumes after that"
+            if (
+                before["scheduled"]
+                or os.environ.get("PEAK_GUARD", "").strip().lower()
+                in {"peak", "on", "1", "true", "yes"}
+            )
+            else "off-peak anyway"
+        )
         print(
             f"  {FLAME}▫{RST} {CREAM}allowed{RST} {DIM}until{RST} "
             f"{CREAM}{peakguard.local_label(until)}{RST} {FAINT}· {tail}{RST}"
@@ -8992,7 +8850,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     if command == "record":
-        peakguard.record(rest[0] if rest else "unknown", rest[1] if len(rest) > 1 else "")
+        source = rest[0] if rest else "unknown"
+        session = rest[1] if len(rest) > 1 else ""
+        peakguard.record(source, session)
         return 0
 
     print(f"peak-guard: unknown command {command!r}", file=sys.stderr)
@@ -9003,160 +8863,160 @@ if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
 PEAKGUARD_CLI
 
-write_atomic "$ROUTER" 0755 <<'ROUTER_PY'
-#!/usr/bin/env python3
-"""Move DeepSeek V4.1 Flash between the free OpenCode model and OpenCode Go.
+write_atomic "$HERMES_PLUGIN/plugin.yaml" 0644 <<'HERMES_GUARD_MANIFEST'
+name: peak-guard
+label: Peak Pricing Guard
+kind: standalone
+version: 1.0.0
+description: >
+  Blocks paid OpenCode Go during DeepSeek peak pricing.
+requires_hermes: ">=0.21.6"
+provides_tools: []
+provides_hooks:
+  - pre_llm_call
+HERMES_GUARD_MANIFEST
 
-The schedule and the free/paid route live in ~/.local/lib/peakguard.py. This
-script only applies that route to OpenCode and Hermes and notices when a free
-request has failed.
+write_atomic "$HERMES_PLUGIN/__init__.py" 0644 <<'HERMES_GUARD_PLUGIN'
+"""peak-guard — block paid Go during peak.
 
-Free first, paid Go only outside peak, free attempted during peak even when the
-free bucket is exhausted. Safe to run every minute.
+``pre_llm_call`` runs once per turn before the provider is called. Returning
+``{"action": "block", "message": ...}`` ends the turn with that message and no
+inference request, covering the CLI, desktop app, gateway and cron. This is the
+place a manual `/model` switch to paid Go is refused during peak.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_LIB = Path.home() / ".local/lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+import peakguard  # noqa: E402
+
+__all__ = ["register"]
+
+
+def _pre_llm_call(
+    model: str = "", session_id: str = "", **_: object
+) -> dict | None:
+    try:
+        state = peakguard.state()
+        message = peakguard.block_message(state, model)
+        if message:
+            peakguard.record("hermes", session_id)
+            return {"action": "block", "message": message}
+    except Exception:
+        return None
+    return None
+
+
+def register(ctx) -> None:  # pragma: no cover - registered by the plugin loader
+    ctx.register_hook("pre_llm_call", _pre_llm_call)
+HERMES_GUARD_PLUGIN
+
+write_atomic "$OC_PLUGIN/index.ts" 0644 <<'OC_GUARD_PLUGIN'
+import { Plugin } from "@opencode/plugin"
+import { spawn, spawnSync } from "node:child_process"
+
+/**
+ * Peak pricing guard.
+ *
+ * DeepSeek bills the V4 models at 2x between 01:00-04:00 and 06:00-10:00 UTC,
+ * Monday to Friday, and OpenCode Go resells them at the same rates. This
+ * refuses a paid Go request during peak.
+ *
+ * The schedule lives in ~/.local/lib/peakguard.py; this asks
+ * `peak-guard status --json` rather than carrying a second copy. A missing or
+ * broken CLI fails open and says so once on stderr.
+ */
+
+const HOME = process.env.HOME ?? ""
+const CLI = `${HOME}/.local/bin/peak-guard`
+
+type Status = {
+    peak: boolean
+    paid_blocked: string
+    notice: string
+}
+
+let warned = false
+let lastNotice = 0
+let cached: { at: number; value: Status | null } | null = null
+
+function status(): Status | null {
+    if (cached && Date.now() - cached.at < 5000) return cached.value
+    try {
+        const out = spawnSync(CLI, ["status", "--json"], { encoding: "utf8", timeout: 2000 })
+        if (out.status !== 0 || !out.stdout) throw new Error(out.stderr || "no output")
+        cached = { at: Date.now(), value: JSON.parse(out.stdout) as Status }
+        return cached.value
+    } catch (error) {
+        if (!warned) {
+            warned = true
+            console.error(`peak-guard: cannot read the schedule (${error}); allowing usage`)
+        }
+        cached = { at: Date.now(), value: null }
+        return null
+    }
+}
+
+function detach(command: string, args: string[]) {
+    try {
+        const child = spawn(command, args, { stdio: "ignore" })
+        child.on("error", () => {})
+        child.unref()
+    } catch {}
+}
+
+/** Log every block; show a desktop toast at most every ten minutes. */
+function report(s: Status, sessionID: string) {
+    detach(CLI, ["record", "opencode", sessionID || ""])
+    if (Date.now() - lastNotice < 10 * 60 * 1000) return
+    lastNotice = Date.now()
+    if (s.notice) {
+        detach("notify-send", ["-a", "Peak guard", "-u", "normal", "Peak pricing", s.notice])
+    }
+}
+
+/** A thrown hook error aborts the request before it is dispatched. */
+function refuse(message: string, s: Status, sessionID: string): never {
+    report(s, sessionID)
+    throw new Error(message)
+}
+
+export default Plugin.define({
+    id: "ricelin.peak-guard",
+    async setup(ctx: any) {
+        // Paid Go during peak: refuse even if the user selected it by hand.
+        await ctx.session.hook(
+            "model.request",
+            (event: any) => {
+                const s = status()
+                if (s?.paid_blocked) refuse(s.paid_blocked, s, event?.sessionID ?? "")
+            },
+            { providerID: "opencode-go" },
+        )
+    },
+})
+OC_GUARD_PLUGIN
+
+# Pin both tools once. No timer and no later process rewrites these files.
+python3 - "$OC_CONFIG" "$HERMES_CONFIG" <<'PIN_MODELS'
 import json
 import os
 import re
-import shutil
-import sqlite3
-import subprocess
 import sys
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path.home() / ".local/lib"))
-import peakguard  # noqa: E402
-
-FREE_PROVIDER = "opencode"
+oc_path = Path(sys.argv[1])
+hm_path = Path(sys.argv[2])
+PAID = "opencode-go/deepseek-v4.1-flash"
+PAID_MODEL = "deepseek-v4.1-flash"
 PAID_PROVIDER = "opencode-go"
-FREE_MODEL = peakguard.FREE_MODEL
-PAID_MODEL = peakguard.PAID_MODEL
-FREE_CONTEXT = peakguard.FREE_CONTEXT
-
-HOME = Path.home()
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or (HOME / ".config"))
-STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (HOME / ".local/state"))
-DATA_HOME = Path(os.environ.get("XDG_DATA_HOME") or (HOME / ".local/share"))
-HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (HOME / ".hermes"))
-
-STATE = STATE_HOME / "ricelin" / "model-route"
-ROUTE_FILE = STATE / "route.json"
-OC_CONFIG = CONFIG / "opencode" / "opencode.json"
-OC_DB = DATA_HOME / "opencode" / "opencode.db"
-OC_LOG = DATA_HOME / "opencode" / "log" / "opencode.log"
-HERMES_CONFIG = HERMES_HOME / "config.yaml"
-HERMES_LOGS = tuple(
-    HERMES_HOME / "logs" / name
-    for name in ("errors.log", "agent.log", "gateway.log", "gui.log")
-)
-
-QUOTA_MARKERS = peakguard.FREE_ERROR_MARKERS
-FREE_RE = re.compile(r'billing_source\\?"?\s*:\s*\\?"?free')
-TS_RE = re.compile(r"timestamp=([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z)")
-
-
-def use_free(route: str) -> bool:
-    return route in ("free", "blocked")
-
-
-def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(text, encoding="utf-8")
-    try:
-        os.chmod(temporary, mode)
-    except OSError:
-        pass
-    os.replace(temporary, path)
-
-
-def read_json(path: Path, default):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-
-
-def parse_ts(line: str) -> int:
-    match = TS_RE.search(line)
-    if not match:
-        return 0
-    value = match.group(1)
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-        try:
-            return int(
-                datetime.strptime(value, fmt).replace(tzinfo=timezone.utc).timestamp()
-            )
-        except ValueError:
-            continue
-    return 0
-
-
-def scan_file(path: Path, offset: int, strict: bool = True):
-    """Read complete new lines; return (offset, last quota, last free success).
-
-    ``strict`` keeps the OpenCode scan to real error/diagnostic lines. Its log
-    also records shell commands and tool output, so a command that merely
-    mentions "billing_source free" must not look like a successful request.
-    """
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return offset, 0, 0
-    if size < offset:
-        offset = 0
-    if size == offset:
-        return offset, 0, 0
-    try:
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            data = handle.read(size - offset)
-    except OSError:
-        return offset, 0, 0
-
-    cut = data.rfind(b"\n")
-    if cut < 0:
-        return offset, 0, 0
-    complete = data[: cut + 1]
-    new_offset = offset + cut + 1
-
-    quota_at = 0
-    free_at = 0
-    for line in complete.decode("utf-8", "ignore").splitlines():
-        low = line.lower()
-        stamp = parse_ts(line) or int(time.time())
-        is_error = (
-            not strict
-            or "level=error" in low
-            or "ai.error" in low
-            or "quotaexceeded" in low
-        )
-        if is_error and any(marker in low for marker in QUOTA_MARKERS):
-            quota_at = max(quota_at, stamp)
-        if (not strict or "session generation usage diagnostic" in low) and FREE_RE.search(low):
-            free_at = max(free_at, stamp)
-    return new_offset, quota_at, free_at
-
-
-def load_state() -> dict:
-    state = read_json(ROUTE_FILE, {})
-    if not isinstance(state, dict):
-        state = {}
-    state.setdefault("opencode_log_offset", 0)
-    state.setdefault("hermes_log_offsets", {})
-    return state
-
-
-def save_state(state: dict) -> None:
-    atomic_write(
-        ROUTE_FILE,
-        json.dumps(state, indent=2, sort_keys=True) + "\n",
-        0o600,
-    )
+PAID_BASE = "https://opencode.ai/zen/go/v1"
 
 
 def strip_jsonc(text: str) -> str:
@@ -9214,8 +9074,41 @@ def strip_jsonc(text: str) -> str:
     return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
-def edit_hermes_model(text: str, free: bool) -> str:
-    """Change only the active keys in the top-level model: block."""
+def write_atomic(path: Path, text: str) -> None:
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def pin_opencode() -> str:
+    if oc_path.exists():
+        try:
+            data = json.loads(strip_jsonc(oc_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            sys.exit(f"peak guard: cannot parse {oc_path}: {exc}")
+        if not isinstance(data, dict):
+            sys.exit(f"peak guard: {oc_path} is not a JSON object")
+        before = json.dumps(data, sort_keys=True)
+    else:
+        data = {}
+        before = ""
+
+    data.setdefault("$schema", "https://opencode.ai/config.json")
+    data["model"] = PAID
+    if json.dumps(data, sort_keys=True) != before:
+        write_atomic(oc_path, json.dumps(data, indent=2) + "\n")
+    return "pinned"
+
+
+def pin_hermes() -> str:
+    if not hm_path.exists():
+        return "not installed"
+    text = hm_path.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     start = None
     for index, line in enumerate(lines):
@@ -9223,7 +9116,7 @@ def edit_hermes_model(text: str, free: bool) -> str:
             start = index
             break
     if start is None:
-        return text
+        return "no top-level model block; left alone"
 
     end = len(lines)
     for index in range(start + 1, len(lines)):
@@ -9261,26 +9154,6 @@ def edit_hermes_model(text: str, free: bool) -> str:
         ):
             del block[index]
 
-    def set_header(name: str, value: str) -> None:
-        index = find_key("default_headers")
-        if index is None:
-            anchor = find_key("api_key")
-            at = anchor + 1 if anchor is not None else len(block)
-            block[at:at] = [
-                "  default_headers:\n",
-                f'    {name}: "{value}"\n',
-            ]
-            return
-        cursor = index + 1
-        while cursor < len(block) and (
-            block[cursor].startswith("    ") or block[cursor].startswith("\t")
-        ):
-            if re.match(rf"^    {re.escape(name)}:\s*", block[cursor]):
-                block[cursor] = f'    {name}: "{value}"\n'
-                return
-            cursor += 1
-        block.insert(cursor, f'    {name}: "{value}"\n')
-
     def remove_header(name: str) -> None:
         index = find_key("default_headers")
         if index is None:
@@ -9296,438 +9169,26 @@ def edit_hermes_model(text: str, free: bool) -> str:
         if index + 1 >= len(block) or not block[index + 1].startswith(("    ", "\t")):
             del block[index]
 
-    if free:
-        set_key("default", FREE_MODEL)
-        set_key("provider", "custom")
-        set_key("base_url", "https://opencode.ai/inference/openai/v1")
-        set_key("api_key", "${OPENCODE_GO_API_KEY}")
-        set_key("context_length", str(FREE_CONTEXT), quote=False)
-        set_header("User-Agent", "opencode/2.2.5")
-    else:
-        set_key("default", PAID_MODEL)
-        set_key("provider", PAID_PROVIDER)
-        set_key("base_url", "https://opencode.ai/zen/go/v1")
-        remove_key("api_key")
-        remove_key("context_length")
-        remove_header("User-Agent")
+    set_key("default", PAID_MODEL)
+    set_key("provider", PAID_PROVIDER)
+    set_key("base_url", PAID_BASE)
+    remove_key("api_key")
+    remove_key("context_length")
+    remove_header("User-Agent")
 
-    return "".join(lines[: start + 1] + block + lines[end:])
+    updated = "".join(lines[: start + 1] + block + lines[end:])
+    if updated != text:
+        write_atomic(hm_path, updated)
+    return "pinned"
 
 
-def update_opencode(route: str, peak: bool) -> bool:
-    data = {}
-    if OC_CONFIG.exists():
-        try:
-            data = json.loads(strip_jsonc(OC_CONFIG.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as exc:
-            print(f"model route: cannot parse {OC_CONFIG}: {exc}", file=sys.stderr)
-            return False
-        if not isinstance(data, dict):
-            print(f"model route: {OC_CONFIG} is not a JSON object", file=sys.stderr)
-            return False
+print(f"peak guard: OpenCode {pin_opencode()}")
+print(f"peak guard: Hermes {pin_hermes()}")
+PIN_MODELS
 
-    before = json.dumps(data, sort_keys=True)
-    data.setdefault("$schema", "https://opencode.ai/config.json")
-    data["model"] = (
-        f"{FREE_PROVIDER}/{FREE_MODEL}"
-        if use_free(route)
-        else f"{PAID_PROVIDER}/{PAID_MODEL}"
-    )
+rm -rf "$HOME/.local/lib/__pycache__"
 
-    policies = data.get("policies") or []
-    if not isinstance(policies, list):
-        policies = []
-    policies = [
-        policy
-        for policy in policies
-        if not (
-            isinstance(policy, dict)
-            and policy.get("action") == "provider.use"
-            and policy.get("resource") == PAID_PROVIDER
-        )
-    ]
-    if peak:
-        policies.append(
-            {"action": "provider.use", "resource": PAID_PROVIDER, "effect": "deny"}
-        )
-    if policies:
-        data["policies"] = policies
-    else:
-        data.pop("policies", None)
-
-    if json.dumps(data, sort_keys=True) == before:
-        return False
-    atomic_write(OC_CONFIG, json.dumps(data, indent=2) + "\n", 0o644)
-    return True
-
-
-def update_hermes(route: str) -> bool:
-    try:
-        text = HERMES_CONFIG.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    updated = edit_hermes_model(text, use_free(route))
-    if updated == text:
-        return False
-    try:
-        mode = os.stat(HERMES_CONFIG).st_mode & 0o777
-    except OSError:
-        mode = 0o600
-    atomic_write(HERMES_CONFIG, updated, mode)
-    return True
-
-
-def update_sessions(route: str) -> bool:
-    """Move non-archived OpenCode sessions to the same model as the config."""
-    if not OC_DB.exists():
-        return False
-    target = (FREE_PROVIDER, FREE_MODEL) if use_free(route) else (PAID_PROVIDER, PAID_MODEL)
-    previous = (PAID_PROVIDER, PAID_MODEL) if use_free(route) else (FREE_PROVIDER, FREE_MODEL)
-    changed = False
-    try:
-        connection = sqlite3.connect(f"file:{OC_DB}?mode=rw", uri=True, timeout=5)
-        connection.execute("PRAGMA busy_timeout=5000")
-        rows = connection.execute(
-            "SELECT id, model FROM session_v2 "
-            "WHERE time_archived IS NULL AND time_suspended IS NULL"
-        ).fetchall()
-        for session_id, raw in rows:
-            try:
-                model = json.loads(raw) if raw else {}
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(model, dict):
-                continue
-            if model.get("providerID") != previous[0] or model.get("id") != previous[1]:
-                continue
-            model["providerID"] = target[0]
-            model["id"] = target[1]
-            if model.get("variant") not in ("low", "high", "max"):
-                model.pop("variant", None)
-            connection.execute(
-                "UPDATE session_v2 SET model = ?, time_updated = ? WHERE id = ?",
-                (
-                    json.dumps(model, separators=(",", ":")),
-                    int(time.time() * 1000),
-                    session_id,
-                ),
-            )
-            changed = True
-        if changed:
-            connection.commit()
-        connection.close()
-    except sqlite3.Error as exc:
-        print(f"model route: cannot update OpenCode sessions: {exc}", file=sys.stderr)
-        return False
-    return changed
-
-
-def reload_opencode() -> None:
-    if not shutil.which("opencode"):
-        return
-    try:
-        running = subprocess.run(
-            ["pgrep", "-f", r"opencode.*serve"],
-            capture_output=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return
-    if running.returncode != 0:
-        return
-    try:
-        subprocess.run(
-            ["opencode", "reload"],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-
-def main() -> int:
-    moment = datetime.now(timezone.utc)
-    try:
-        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(STATE, 0o700)
-    except OSError:
-        pass
-
-    state = load_state()
-    marker = peakguard.free_exhausted_at(moment)
-
-    offset, quota_at, free_at = scan_file(
-        OC_LOG, int(state.get("opencode_log_offset", 0))
-    )
-    state["opencode_log_offset"] = offset
-    if quota_at > marker:
-        peakguard.mark_free_exhausted(datetime.fromtimestamp(quota_at, timezone.utc))
-        marker = quota_at
-    elif free_at > marker and free_at >= int(moment.timestamp()) - 86400:
-        peakguard.clear_free_exhausted()
-        marker = 0
-
-    offsets = state.get("hermes_log_offsets")
-    if not isinstance(offsets, dict) or not offsets:
-        # First run: the plugin covers new failures. Do not rescan old Hermes
-        # logs, because an old quota line would look current (their timestamps
-        # are not in the OpenCode `timestamp=` shape).
-        offsets = {}
-        for path in HERMES_LOGS:
-            try:
-                offsets[str(path)] = path.stat().st_size
-            except OSError:
-                offsets[str(path)] = 0
-    for path in HERMES_LOGS:
-        key = str(path)
-        offset, failed_at, _ = scan_file(path, int(offsets.get(key, 0)), strict=False)
-        offsets[key] = offset
-        if failed_at > marker:
-            peakguard.mark_free_exhausted(datetime.fromtimestamp(failed_at, timezone.utc))
-            marker = failed_at
-    state["hermes_log_offsets"] = offsets
-
-    gate = peakguard.state(moment)
-    route = gate["route"]
-    effective_peak = gate["peak"]
-
-    changed_opencode = update_opencode(route, effective_peak)
-    changed_hermes = update_hermes(route)
-    changed_sessions = update_sessions(route)
-    if changed_opencode:
-        reload_opencode()
-
-    state["last_route"] = route
-    state["updated_at"] = int(moment.timestamp())
-    save_state(state)
-
-    if changed_opencode or changed_hermes or changed_sessions:
-        print(
-            f"model route: {route} "
-            f"({'peak' if effective_peak else 'off-peak'}, "
-            f"free {'exhausted' if gate['free_exhausted'] else 'available'})"
-        )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-ROUTER_PY
-
-write_atomic "$UNIT_DIR/ricelin-model-route.service" 0644 <<'UNIT'
-[Unit]
-Description=Route DeepSeek V4.1 Flash between the free OpenCode model and OpenCode Go
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/ricelin-model-route
-UNIT
-
-write_atomic "$UNIT_DIR/ricelin-model-route.timer" 0644 <<'UNIT'
-[Unit]
-Description=Run the Ricelin model router every minute
-
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec=60s
-AccuracySec=10s
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-UNIT
-
-write_atomic "$HERMES_PLUGIN/plugin.yaml" 0644 <<'HERMES_GUARD_MANIFEST'
-name: peak-guard
-label: Peak Pricing Guard
-kind: standalone
-version: 1.0.0
-description: >
-  Blocks paid OpenCode Go during DeepSeek peak pricing and records free-quota
-  exhaustion so the Ricelin model router can switch to the free model.
-requires_hermes: ">=0.21.6"
-provides_tools: []
-provides_hooks:
-  - pre_llm_call
-  - api_request_error
-HERMES_GUARD_MANIFEST
-
-write_atomic "$HERMES_PLUGIN/__init__.py" 0644 <<'HERMES_GUARD_PLUGIN'
-"""peak-guard — block paid Go during peak and record free-quota failures.
-
-``pre_llm_call`` runs once per turn before the provider is called. Returning
-``{"action": "block", "message": ...}`` ends the turn with that message and no
-inference request, covering the CLI, desktop app, gateway and cron. This is the
-place a manual `/model` switch to paid Go is refused during peak.
-
-``api_request_error`` only records a free-quota failure; the router reads the
-marker and moves both tools at the next pass.
-"""
-
-from __future__ import annotations
-
-import sys
-from pathlib import Path
-
-_LIB = Path.home() / ".local/lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-import peakguard  # noqa: E402
-
-__all__ = ["register"]
-
-
-def _pre_llm_call(model: str = "", session_id: str = "", **_: object):
-    try:
-        state = peakguard.state()
-        message = peakguard.block_message(state, model)
-        if message:
-            peakguard.record("hermes", session_id)
-            return {"action": "block", "message": message}
-    except Exception:
-        return None
-    return None
-
-
-def _on_api_request_error(**kwargs: object) -> None:
-    try:
-        text = " ".join(
-            str(kwargs.get(key) or "")
-            for key in ("error", "error_message", "error_body", "reason", "status_code")
-        ).lower()
-        if any(marker in text for marker in peakguard.FREE_ERROR_MARKERS):
-            peakguard.mark_free_exhausted()
-            peakguard.record("hermes-quota", str(kwargs.get("session_id") or ""))
-    except Exception:
-        pass
-
-
-def register(ctx) -> None:  # pragma: no cover - registered by the plugin loader
-    ctx.register_hook("pre_llm_call", _pre_llm_call)
-    ctx.register_hook("api_request_error", _on_api_request_error)
-HERMES_GUARD_PLUGIN
-
-write_atomic "$OC_PLUGIN/index.ts" 0644 <<'OC_GUARD_PLUGIN'
-import { Plugin } from "@opencode/plugin"
-import { spawn, spawnSync } from "node:child_process"
-
-/**
- * Peak pricing and free-quota guard.
- *
- * DeepSeek bills the V4 models at 2x between 01:00-04:00 and 06:00-10:00 UTC,
- * Monday to Friday, and OpenCode Go resells them at the same rates. The router
- * prefers the free OpenCode model; this plugin refuses a paid Go request during
- * peak and refuses a turn entirely when the free bucket is exhausted during
- * peak (paid Go is not a fallback there).
- *
- * The schedule and route live in ~/.local/lib/peakguard.py; this asks
- * `peak-guard status --json` rather than carrying a second copy. A missing or
- * broken CLI fails open and says so once on stderr.
- */
-
-const CLI = `${process.env.HOME}/.local/bin/peak-guard`
-
-type Status = {
-    route: "free" | "paid" | "blocked"
-    peak: boolean
-    free_exhausted: boolean
-    free_reset: string | null
-    until: string | null
-    blocked: string
-    paid_blocked: string
-    notice: string
-}
-
-let warned = false
-let lastNotice = 0
-let cached: { at: number; value: Status | null } | null = null
-
-function status(): Status | null {
-    if (cached && Date.now() - cached.at < 5000) return cached.value
-    try {
-        const out = spawnSync(CLI, ["status", "--json"], { encoding: "utf8", timeout: 2000 })
-        if (out.status !== 0 || !out.stdout) throw new Error(out.stderr || "no output")
-        cached = { at: Date.now(), value: JSON.parse(out.stdout) as Status }
-        return cached.value
-    } catch (error) {
-        if (!warned) {
-            warned = true
-            console.error(`peak-guard: cannot read the schedule (${error}); allowing usage`)
-        }
-        cached = { at: Date.now(), value: null }
-        return null
-    }
-}
-
-function detach(command: string, args: string[]) {
-    try {
-        const child = spawn(command, args, { stdio: "ignore" })
-        child.on("error", () => {})
-        child.unref()
-    } catch {}
-}
-
-/** The TUI only shows an empty 500 for a prompt-hook throw (opencode#55212). */
-function announce(s: Status, sessionID: string) {
-    if (Date.now() - lastNotice < 10 * 60 * 1000) return
-    lastNotice = Date.now()
-    detach(CLI, ["record", "opencode", sessionID || ""])
-    if (s.notice) {
-        detach("notify-send", ["-a", "Peak guard", "-u", "normal", "Peak pricing", s.notice])
-    }
-}
-
-function refuse(message: string, s: Status, sessionID: string): never {
-    announce(s, sessionID)
-    throw new Error(message)
-}
-
-export default Plugin.define({
-    id: "ricelin.peak-guard",
-    async setup(ctx: any) {
-        // Paid Go during peak: refuse even if the user selected it by hand.
-        await ctx.session.hook(
-            "model.request",
-            (event: any) => {
-                const s = status()
-                if (s?.paid_blocked) refuse(s.paid_blocked, s, event?.sessionID ?? "")
-            },
-            { providerID: "opencode-go" },
-        )
-
-        // Free provider during peak with the daily bucket exhausted: refuse the
-        // request rather than letting it fail with a generic quota error.
-        await ctx.session.hook(
-            "model.request",
-            (event: any) => {
-                const s = status()
-                if (s?.route === "blocked") refuse(s.blocked, s, event?.sessionID ?? "")
-            },
-            { providerID: "opencode" },
-        )
-    },
-})
-OC_GUARD_PLUGIN
-
-# The old implementation used a separate Hermes plugin. Remove it so two
-# quota observers do not race each other.
 hermes=$(hermes_bin)
-if [ -n "$hermes" ]; then
-    "$hermes" plugins disable ricelin-model-route >/dev/null 2>&1 || true
-fi
-rm -rf "$OLD_HERMES_PLUGIN"
-
-"$ROUTER" || true
-
-systemctl --user daemon-reload >/dev/null 2>&1 || true
-if systemctl --user enable --now ricelin-model-route.timer >/dev/null 2>&1; then
-    echo "Model routing: free first; Go outside peak; Go refused during peak"
-else
-    echo "Model routing: helper installed; enable ricelin-model-route.timer in your user session" >&2
-fi
-
 if [ -n "$hermes" ]; then
     "$hermes" plugins enable peak-guard >/dev/null 2>&1 \
         || echo "Hermes: could not enable peak-guard; run 'hermes plugins enable peak-guard'" >&2
@@ -9736,9 +9197,9 @@ else
     echo "Hermes is not installed yet; the peak-guard plugin will wait under $HERMES_PLUGIN" >&2
 fi
 
-rm -rf "$HOME/.local/lib/__pycache__" "$HERMES_PLUGIN/__pycache__"
+rm -rf "$HERMES_PLUGIN/__pycache__"
+echo "Peak guard: paid OpenCode Go is blocked 01-04 and 06-10 UTC"
 )
-
 # ---------------------------------------------------------------- stage_nightlight_ramp
 stage_nightlight_ramp() (
 # Fade the scheduled night light instead of switching at the minute.
