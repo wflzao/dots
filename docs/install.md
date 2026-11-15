@@ -5,7 +5,8 @@ re-run safely.
 
 ## What it changes
 
-- Installs SDDM, the Thunar stack, Zen Browser, OpenCode and NVIDIA tools.
+- Installs SDDM, the Thunar stack, Zen Browser, the latest OpenCode 2 (the
+  official installer; the `extra` package is older) and NVIDIA tools.
 - Installs Hermes Agent and builds Hermes Desktop through the official
   bootstrap and runs Hermes's own interactive setup wizard. The provider,
   model, API key, tools, gateway and telemetry choices are made in that wizard;

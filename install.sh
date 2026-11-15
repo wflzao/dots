@@ -527,7 +527,7 @@ aur_install() {
 install_packages() {
     local missing=()
     local p
-    for p in thunar thunar-volman gvfs tumbler xorg-xrandr xorg-xrdb opencode; do
+    for p in thunar thunar-volman gvfs tumbler xorg-xrandr xorg-xrdb ripgrep; do
         pkg_installed "$p" || missing+=("$p")
     done
     if [ "$NVIDIA_OK" = 1 ] && ! pkg_installed nvidia-settings; then
@@ -552,6 +552,46 @@ install_packages() {
         fi
     fi
 }
+
+install_opencode() (
+# Install or upgrade OpenCode 2 from the official channel.
+#
+# The `extra` package lags upstream (2.2.7 while the current release is
+# 2.3.0 at the time of writing), and OpenCode 2 is not published through the
+# v1 installer. The
+# official v2 installer fetches the latest binary into ~/.opencode/bin, so run
+# it only when that binary is missing or older than the version endpoint
+# reports. --no-modify-path keeps shell edits in stage_fish_config, which adds
+# the directory to fish explicitly.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+BIN="$HOME/.opencode/bin/opencode"
+META="https://opencode.ai/update/api/latest/cli/npm"
+INSTALLER="https://opencode.ai/v2/install"
+
+latest=$(curl -fsSL --retry 3 --connect-timeout 15 --max-time 30 "$META" 2>/dev/null \
+    | jq -r '.version // empty' 2>/dev/null || true)
+current=""
+if [ -x "$BIN" ]; then
+    current=$("$BIN" --version 2>/dev/null | awk '{print $NF}' || true)
+    current=${current#v}
+fi
+
+if [ -z "$latest" ]; then
+    if [ -x "$BIN" ]; then
+        echo "OpenCode: could not check the latest version; keeping ${current:-installed}" >&2
+        exit 0
+    fi
+    echo "OpenCode: could not check the latest version; running the official installer" >&2
+elif [ "$current" = "$latest" ]; then
+    echo "OpenCode: $current is already the latest"
+    exit 0
+fi
+
+curl -fsSL --retry 3 --connect-timeout 15 "$INSTALLER" | bash -s -- --no-modify-path
+"$BIN" --version
+)
 
 install_hermes() (
 # Install Hermes Agent and build its Electron desktop app.
@@ -971,8 +1011,12 @@ PY
         ui_warn "KDE selection: active text equals its background"
     fi
 
-    if pkg_installed opencode || command -v opencode >/dev/null 2>&1; then
-        ui_ok "OpenCode: installed"
+    oc_bin="$HOME/.opencode/bin/opencode"
+    if [ -x "$oc_bin" ]; then
+        oc_version=$("$oc_bin" --version 2>/dev/null | awk '{print $NF}' || true)
+        ui_ok "OpenCode: ${oc_version:-installed} ($oc_bin)"
+    elif command -v opencode >/dev/null 2>&1; then
+        ui_warn "OpenCode: on PATH but not at $oc_bin"
     else
         ui_warn "OpenCode: missing"
     fi
@@ -1173,7 +1217,7 @@ confirm() {
     if [ ! -t 0 ]; then
         fail_with 10 "No controlling terminal for confirmation." "Re-run with --yes for a non-interactive install."
     fi
-    printf '\nThis will install packages (including OpenCode), run the\n'
+    printf '\nThis will install packages (including the latest OpenCode), run the\n'
     printf 'Ricelin base installer if needed, apply the rice customisations,\n'
     printf 'remove LightDM, Firefox and Dolphin, and disable other display managers.\n'
     printf 'Dolphin demo files, if present, are removed by the system-integration step.\n\n'
@@ -1221,7 +1265,8 @@ main() {
     else
         run_step "Ricelin base (clone/update + installer wizard)" bootstrap_ricelin
     fi
-    run_step "Packages (Thunar stack, greeter tools, Zen, OpenCode)" install_packages
+    run_step "Packages (Thunar stack, greeter tools, Zen)" install_packages
+    run_step "OpenCode (latest v2)" install_opencode
     run_step_stream "Hermes Agent + Desktop" install_hermes
     run_step "SDDM package + $SDDM_CONF_DIR" install_sddm
     run_step "torii SDDM theme (configs/sddm/themes/torii)" install_torii_theme
@@ -8110,14 +8155,14 @@ fi
 # ---------------------------------------------------------------- stage_fish_config
 stage_fish_config() (
 # Make the fish config safe on a machine without CachyOS, and put ~/.local/bin
-# on PATH.
+# and ~/.opencode/bin on PATH.
 #
 # Ricelin's fish config sources
 # /usr/share/cachyos-fish-config/cachyos-config.fish, which exists only on
 # CachyOS. On Arch and EndeavourOS fish prints an error on every start. The
-# CachyOS file also owns PATH, so ~/.local/bin (where this installer puts
-# hyprshot) is not found. Remove the source line and add the path once;
-# fish_add_path itself is idempotent.
+# CachyOS file also owns PATH, so ~/.local/bin (hyprshot) and ~/.opencode/bin
+# (the latest OpenCode) are not found. Remove the source line and add both
+# paths once; fish_add_path itself is idempotent.
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -8127,8 +8172,9 @@ mkdir -p "$(dirname "$FISH")"
 if [ ! -f "$FISH" ]; then
     write_atomic "$FISH" 0644 <<'FISH'
 fish_add_path "$HOME/.local/bin"
+fish_add_path "$HOME/.opencode/bin"
 FISH
-    echo "fish: created $FISH with ~/.local/bin on PATH"
+    echo "fish: created $FISH with ~/.local/bin and ~/.opencode/bin on PATH"
     exit 0
 fi
 
@@ -8151,12 +8197,25 @@ text = "".join(lines)
 # Do not leave the blank line the removed source left at the top.
 text = re.sub(r"\A[ \t]*\n+", "", text)
 
-if 'fish_add_path "$HOME/.local/bin"' not in text:
+def has_path(suffix):
+    return any(
+        "fish_add_path" in line and suffix in line
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+missing = []
+if not has_path("/.local/bin"):
+    missing.append('fish_add_path "$HOME/.local/bin"')
+if not has_path("/.opencode/bin"):
+    missing.append('fish_add_path "$HOME/.opencode/bin"')
+
+if missing:
     if text and not text.endswith("\n"):
         text += "\n"
     if text and not text.endswith("\n\n"):
         text += "\n"
-    text += 'fish_add_path "$HOME/.local/bin"\n'
+    text += "\n".join(missing) + "\n"
 elif not text.endswith("\n"):
     text += "\n"
 
@@ -8169,7 +8228,7 @@ if text != original:
     except OSError:
         pass
     os.replace(tmp, path)
-    print("fish: removed the CachyOS source and kept ~/.local/bin on PATH")
+    print("fish: removed the CachyOS source; ~/.local/bin and ~/.opencode/bin are on PATH")
 else:
     print("fish: already correct")
 PY

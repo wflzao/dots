@@ -109,6 +109,21 @@ command -v nvibrant
 systemctl --user status nvibrant-75.service
 ```
 
+## OpenCode version
+
+The installer puts the latest OpenCode 2 in `~/.opencode/bin`; the `extra`
+package lags upstream (2.2.7 while the current release was 2.3.0 at the time
+of writing) and is not installed.
+
+```sh
+~/.opencode/bin/opencode --version
+type -a opencode
+```
+
+If `opencode --version` still prints 2.2.x, the shell is resolving
+`/usr/bin/opencode`. `~/.opencode/bin` must come first; the installer adds it
+to fish, or run `fish_add_path $HOME/.opencode/bin` and open a new terminal.
+
 ## Model routing
 
 Inspect the schedule, route and state:

@@ -51,9 +51,11 @@ The installer runs six phases:
    and run `install.sh --sddm`, which opens the upstream installer's own
    wizard. Skipped when `~/.config/hypr/.ricelin-managed` exists, unless
    `--reinstall-base`.
-3. **Packages** — SDDM, Thunar stack, greeter tools, `nvidia-settings`, Zen
-   and OpenCode; bootstraps `yay`/`paru` when needed. `nvibrant-bin` is
-   installed by the vibrance stage. Hermes Agent and Hermes Desktop are
+3. **Packages** — SDDM, Thunar stack, greeter tools, `nvidia-settings` and
+   Zen; installs the latest OpenCode 2 with the official installer because the
+   `extra` package lags upstream; bootstraps `yay`/`paru` when needed.
+   `nvibrant-bin` is installed by the vibrance stage. Hermes Agent and Hermes
+   Desktop are
    installed from the official bootstrap with their own interactive setup
    wizard: the provider, model, API key, tools, gateway and telemetry choices
    are yours. The installer does not preselect or configure them.
