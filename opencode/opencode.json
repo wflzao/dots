@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/deepseek-v4.1-flash",
+  "plugin": [
+    "oh-my-opencode-slim@3.0.7"
+  ],
+  "lsp": true,
+  "experimental": {
+    "subagent_depth": 2
+  },
+  "permissions": [
+    { "action": "bash", "resource": "git push --force*", "effect": "ask" },
+    { "action": "bash", "resource": "git push -f*", "effect": "ask" },
+    { "action": "bash", "resource": "git reset --hard*", "effect": "ask" },
+    { "action": "bash", "resource": "git clean -f*", "effect": "ask" },
+    { "action": "bash", "resource": "rm -rf *", "effect": "ask" }
+  ]
+}

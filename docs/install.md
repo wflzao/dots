@@ -34,6 +34,12 @@ re-run safely.
 - Makes clipboard history wheel scrolling continuous.
 - Feeds the pill's agent line from Claude Code, OpenCode and Hermes, and calls
   the source "AI agent" and the module "Activity".
+- Installs the production OpenCode setup from `opencode/`: the
+  `oh-my-opencode-slim` `production` preset (plan and build at DeepSeek V4.1
+  Flash `max`, read-only Oracle/Explorer/Observer), the global engineering
+  standards in `AGENTS.md`, and the `/spec`, `/verify`, `/review` and `/test`
+  commands. A file that differs is kept as `*.pre-ricelin` before the first
+  overwrite.
 - Routes DeepSeek V4.1 Flash between OpenCode's free model and OpenCode Go:
   free first, Go only outside the weekday 01:00–04:00 and 06:00–10:00 UTC peak
   windows, and free again after the daily 00:00 UTC reset. OpenCode sessions

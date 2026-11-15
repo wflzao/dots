@@ -1254,6 +1254,7 @@ main() {
     run_step "Hermes desktop integration" stage_hermes_skin
     run_step "Hermes desktop log quieting" stage_hermes_logs
     run_step "AI agent pill activity" stage_agent_activity
+    run_step "OpenCode production config" stage_opencode_config
     run_step "Peak guard (Go blocked 01-04, 06-10 UTC)" stage_peak_guard
     run_step "Night-light 5-minute fade" stage_nightlight_ramp
     run_step "Display native resolution + highest refresh" stage_display_mode
@@ -9209,6 +9210,60 @@ fi
 rm -rf "$HERMES_PLUGIN/__pycache__"
 echo "Peak guard: paid OpenCode Go is blocked 01-04 and 06-10 UTC"
 )
+# ---------------------------------------------------------------- stage_opencode_config
+stage_opencode_config() (
+# Install the production OpenCode setup.
+#
+# The files live in this repository under opencode/ and are copied into
+# ~/.config/opencode/:
+#
+#   opencode.json                      plugin, subagent depth, bash rails
+#   oh-my-opencode-slim.json           production preset, council, no fallbacks
+#   AGENTS.md                          global engineering standards
+#   command/{spec,verify,review,test}.md
+#   oh-my-opencode-slim/production/    orchestrator and observer appends
+#   templates/repo-AGENTS.md           per-repository starter
+#
+# The peak-guard stage owns ~/.config/opencode/plugins and the model pin; this
+# stage only replaces the files it ships. A file the user has edited is kept as
+# <file>.pre-ricelin before the first overwrite, so a re-run is recoverable.
+# The oh-my-opencode-slim package itself is named in opencode.json; OpenCode
+# installs it into its own cache on first start, so nothing is vendored here.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+DEST="$CONFIG/opencode"
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+SRC="$HERE/opencode"
+
+[ -n "$HERE" ] && [ -d "$SRC" ] || {
+    echo "OpenCode config files not found (expected $SRC)." >&2
+    echo "Run install.sh from a checkout of the repository." >&2
+    exit 1
+}
+
+installed=0
+while IFS= read -r -d '' src; do
+    rel=${src#"$SRC"/}
+    dest="$DEST/$rel"
+    mkdir -p "$(dirname -- "$dest")"
+    if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+        continue
+    fi
+    if [ -f "$dest" ] && [ ! -e "$dest.pre-ricelin" ]; then
+        cp -p -- "$dest" "$dest.pre-ricelin"
+    fi
+    tmp=$(mktemp "$(dirname -- "$dest")/.$(basename -- "$dest").XXXXXX")
+    cp -f -- "$src" "$tmp"
+    chmod 0644 "$tmp"
+    mv -f -- "$tmp" "$dest"
+    installed=$((installed + 1))
+done < <(find "$SRC" -type f -print0 | sort -z)
+
+echo "OpenCode: production config in $DEST ($installed file(s) updated)"
+)
+
 # ---------------------------------------------------------------- stage_nightlight_ramp
 stage_nightlight_ramp() (
 # Fade the scheduled night light instead of switching at the minute.

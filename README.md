@@ -67,9 +67,11 @@ The installer runs six phases:
    `4.jpg` as the default with its matugen tone pinned to Dark while the
    others stay on Auto, native resolution at the highest refresh, the generated
    Ricelin skin for the Hermes Desktop default window, the Claude Code /
-   OpenCode / Hermes activity line in the pill, DeepSeek V4.1 Flash routing
-   between OpenCode's free model and OpenCode Go, KDE/fish and terminal
-   palette, the fish config (no CachyOS source, `~/.local/bin` on PATH), the
+   OpenCode / Hermes activity line in the pill, the production OpenCode setup
+   (oh-my-opencode-slim `production` preset, global `AGENTS.md`, `/spec`,
+   `/verify`, `/review` and `/test`), DeepSeek V4.1 Flash pinned with the
+   peak-pricing guard, KDE/fish and terminal palette, the fish config (no
+   CachyOS source, `~/.local/bin` on PATH), the
    Thunar “Open Terminal Here” action (ghostty), portal colour-scheme sync,
    Zen colours, Thunar, polkit, night-light cursor, wallpaper tone,
    wallpaper-strip centring, lock-screen palette, settings zoom, atomic theme
@@ -154,6 +156,14 @@ The log directory is mode `0700` and the log file is mode `0600`.
 ```text
 .
 ├── install.sh
+├── opencode/
+│   ├── opencode.json
+│   ├── oh-my-opencode-slim.json
+│   ├── AGENTS.md
+│   ├── command/
+│   ├── oh-my-opencode-slim/
+│   └── templates/
+├── wallpapers/
 ├── docs/
 │   ├── install.md
 │   └── troubleshooting.md

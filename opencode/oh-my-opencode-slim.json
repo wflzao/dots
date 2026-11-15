@@ -1,0 +1,107 @@
+{
+  "$schema": "https://unpkg.com/oh-my-opencode-slim@latest/oh-my-opencode-slim.schema.json",
+  "preset": "production",
+  "presets": {
+    "production": {
+      "agents": {
+        "orchestrator": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "high",
+          "skills": [
+            "*"
+          ]
+        },
+        "plan": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "max"
+        },
+        "build": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "max"
+        },
+        "oracle": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "max",
+          "skills": [
+            "simplify",
+            "verification-planning",
+            "step-back"
+          ],
+          "permission": {
+            "edit": "deny"
+          }
+        },
+        "explorer": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "high",
+          "skills": [],
+          "mcps": [
+            "context7",
+            "gh_grep"
+          ],
+          "permission": {
+            "edit": "deny"
+          }
+        },
+        "designer": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "max",
+          "skills": []
+        },
+        "fixer": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "max",
+          "skills": []
+        },
+        "observer": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "high",
+          "skills": [],
+          "permission": {
+            "edit": "deny"
+          }
+        },
+        "council": {
+          "model": "opencode-go/qwen3.8-max",
+          "variant": "xhigh",
+          "skills": []
+        },
+        "paladin": {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "variant": "high",
+          "skills": []
+        }
+      },
+      "marketplace": {
+        "agents": [
+          "alvin/paladin"
+        ]
+      }
+    }
+  },
+  "council": {
+    "default_preset": "production",
+    "presets": {
+      "production": {
+        "alpha": {
+          "model": "opencode-go/kimi-k3.1-pro",
+          "variant": "max"
+        },
+        "beta": {
+          "model": "opencode-go/gemini-4-argon",
+          "variant": "high"
+        },
+        "gamma": {
+          "model": "opencode-go/glm-5.3",
+          "variant": "max"
+        }
+      }
+    }
+  },
+  "fallback": {
+    "enabled": false
+  },
+  "autoUpdate": false,
+  "image_routing": "auto",
+  "disabled_agents": []
+}
