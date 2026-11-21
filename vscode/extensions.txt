@@ -1,0 +1,22 @@
+# VS Code extensions installed by the Ricelin installer.
+# One extension ID per line; blank lines and # comments are ignored.
+aaron-bond.better-comments
+christian-kohler.npm-intellisense
+christian-kohler.path-intellisense
+dbaeumer.vscode-eslint
+eamodio.gitlens
+editorconfig.editorconfig
+esbenp.prettier-vscode
+file-icons.file-icons
+haikalllp.matugen-theme
+james-yu.latex-workshop
+llvm-vs-code-extensions.vscode-clangd
+mhutchie.git-graph
+ms-vscode.cmake-tools
+naumovs.color-highlight
+subframe7536.custom-ui-style
+usernamehw.errorlens
+vadimcn.vscode-lldb
+vscodevim.vim
+xabikos.javascriptsnippets
+yzhang.markdown-all-in-one

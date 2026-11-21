@@ -26,7 +26,7 @@
 #        system handover -> updater guard -> SDDM palette/greeter ->
 #        fans/vibrance -> wallpaper folder -> personal settings/Hermes/agent
 #        activity/peak guard -> night-light fade/display -> palette/terminal
-#        -> fish -> Thunar/polkit -> lock screen -> wallpaper strip ->
+#        -> coding theme -> fish -> Thunar/polkit -> lock screen -> wallpaper strip ->
 #        menus/glass/VRR -> game mode -> screenshots/UI tweaks -> Discord
 #        workspace/rishot removal -> clipboard scrolling -> logout.
 #   6. Final palette render and a verification pass.
@@ -69,7 +69,7 @@ NO_NVIDIA=0
 VERBOSE=0
 
 STEP=0
-TOTAL=46
+TOTAL=49
 PF_FAIL=0
 PF_WARN=0
 PF_CODE=10
@@ -211,6 +211,9 @@ fail_step() {
         *"System integration"*)
             code=26
             hint="Check for a pacman lock, leftover LightDM packages, or a missing sddm.service; the log shows the exact command." ;;
+        *"VS Code"*)
+            code=26
+            hint="Install missing extensions from vscode/extensions.txt with: code --install-extension <id>" ;;
         *"Final palette"*)
             code=26
             hint="Run the palette by hand: python3 ~/.config/hypr/scripts/wallcolors.py \"$(cat ~/.local/state/ricelin-wallpaper 2>/dev/null || true)\"" ;;
@@ -435,6 +438,13 @@ preflight() {
         pf_ok "Zen Browser: installed"
     else
         pf_warn "Zen Browser: not installed (will install zen-browser-bin)"
+    fi
+
+    if command -v code >/dev/null 2>&1 || command -v code-insiders >/dev/null 2>&1 \
+        || command -v codium >/dev/null 2>&1; then
+        pf_ok "VS Code: installed"
+    else
+        pf_warn "VS Code: not installed; the OpenCode coding theme still installs."
     fi
 
     if [ -f "$RICELIN_DIR/$THEME_REL" ]; then
@@ -715,6 +725,7 @@ final_render() {
 verify_report() {
     local soft=${1:-0}
     local fatal=0 current theme htools hmodel hreason hprovider selection_fg selection_bg
+    local vscode_cli vscode_settings vscode_name vscode_candidate vscode_accent vscode_primary vscode_extensions vscode_repo vscode_missing vscode_total extension opencode_bg opencode_surface opencode_mode opencode_expected
     printf '\n%sVerification%s\n' "$B" "$RESET"
 
     if [ -f "$HOME/.config/hypr/.ricelin-managed" ]; then
@@ -1044,6 +1055,85 @@ PY
         ui_warn "Hermes: not installed"
     fi
 
+    vscode_cli=""
+    for vscode_candidate in code code-insiders codium; do
+        if command -v "$vscode_candidate" >/dev/null 2>&1; then
+            vscode_cli=$vscode_candidate
+            break
+        fi
+    done
+    if [ -n "$vscode_cli" ]; then
+        vscode_settings=""
+        for vscode_name in "Code - OSS" "Code" "Code - Insiders" "VSCodium"; do
+            if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/$vscode_name/User/settings.json" ]; then
+                vscode_settings="${XDG_CONFIG_HOME:-$HOME/.config}/$vscode_name/User/settings.json"
+                break
+            fi
+        done
+        vscode_extensions=$("$vscode_cli" --list-extensions 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+        if [ -n "$vscode_settings" ] \
+            && grep -Eq '"workbench\.colorTheme"[[:space:]]*:[[:space:]]*"Matugen"' "$vscode_settings" \
+            && printf '%s\n' "$vscode_extensions" | grep -qx 'haikalllp.matugen-theme' \
+            && [ -s "$HOME/.cache/matugen/vscode-colors" ] \
+            && [ -s "$HOME/.cache/matugen/vscode-colors.json" ]; then
+            vscode_accent=$(sed -n '5p' "$HOME/.cache/matugen/vscode-colors" 2>/dev/null || true)
+            vscode_primary=$(jq -r '.primary // empty' "$HOME/.cache/ricelin/colors.json" 2>/dev/null || true)
+            if [ -n "$vscode_accent" ] && [ "$vscode_accent" = "$vscode_primary" ]; then
+                ui_ok "VS Code: Matugen theme follows the wallpaper (accent $vscode_accent)"
+            else
+                ui_warn "VS Code: accent ${vscode_accent:-missing} does not match the Ricelin primary ${vscode_primary:-missing}"
+            fi
+            if grep -q '"editor.scrollbar.vertical": "hidden"' "$vscode_settings" \
+                && grep -q '"editor.scrollbar.horizontal": "hidden"' "$vscode_settings"; then
+                ui_ok "VS Code: editor scrollbars hidden"
+            else
+                ui_warn "VS Code: editor scrollbars still visible"
+            fi
+        else
+            ui_warn "VS Code: Matugen theme, extension or palette source missing"
+        fi
+        vscode_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)/vscode
+        if [ -n "$vscode_settings" ] && [ -f "$vscode_repo/settings.json" ]; then
+            if cmp -s "$vscode_repo/settings.json" "$vscode_settings"; then
+                ui_ok "VS Code: settings.json current"
+            else
+                ui_warn "VS Code: settings.json differs from vscode/settings.json"
+            fi
+        fi
+        if [ -f "$vscode_repo/extensions.txt" ]; then
+            vscode_missing=0
+            vscode_total=0
+            while IFS= read -r extension; do
+                extension=${extension%%#*}
+                extension=$(printf '%s' "$extension" | tr -d '[:space:]')
+                [ -n "$extension" ] || continue
+                vscode_total=$((vscode_total + 1))
+                if ! printf '%s\n' "$vscode_extensions" | grep -Fxq "$extension"; then
+                    vscode_missing=$((vscode_missing + 1))
+                fi
+            done < "$vscode_repo/extensions.txt"
+            if [ "$vscode_missing" -eq 0 ]; then
+                ui_ok "VS Code: all $vscode_total extensions installed"
+            else
+                ui_warn "VS Code: $vscode_missing of $vscode_total extensions missing"
+            fi
+        fi
+    else
+        ui_skip "VS Code: not installed"
+    fi
+
+    opencode_bg=$(jq -r '.base.background.base // empty' "$HOME/.config/opencode/themes/ricelin.json" 2>/dev/null || true)
+    opencode_surface=$(jq -r '.surface // empty' "$HOME/.cache/ricelin/colors.json" 2>/dev/null || true)
+    opencode_mode=$(jq -r '.theme.mode // empty' "$HOME/.config/opencode/cli.json" 2>/dev/null || true)
+    opencode_expected=$(python3 -c 'import colorsys,sys; r,g,b=(int(sys.argv[1][i:i+2],16)/255 for i in (1,3,5)); print("light" if (max(r,g,b)+min(r,g,b))/2 > 0.5 else "dark")' "$opencode_surface" 2>/dev/null || true)
+    if [ -n "$opencode_bg" ] && [ "$opencode_bg" = "$opencode_surface" ] \
+        && [ -n "$opencode_expected" ] && [ "$opencode_mode" = "$opencode_expected" ] \
+        && jq -e '.theme.name == "ricelin" and .session.scrollbar == false' \
+            "$HOME/.config/opencode/cli.json" >/dev/null 2>&1; then
+        ui_ok "OpenCode: wallpaper theme selected ($opencode_expected), scrollbar hidden"
+    else
+        ui_warn "OpenCode: coding theme missing, stale or not selected"
+    fi
     if [ "$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d \"\')" = "Ricelin" ]; then
         ui_ok "Thunar icons: Ricelin matugen theme"
     else
@@ -1308,6 +1398,7 @@ main() {
     run_step "Portal colour-scheme sync" stage_portal_scheme
     run_step "Zen wallpaper colours" stage_zen_colors
     run_step "One-tone terminal palette" stage_one_tone_palette
+    run_step "Coding theme (VS Code + OpenCode)" stage_vscode
     run_step "Thunar integration" stage_thunar
     run_step "Thunar Open Terminal Here (ghostty)" stage_thunar_terminal_action
     run_step "Hyprtoolkit / polkit palette" stage_hyprtoolkit_palette
@@ -1622,24 +1713,6 @@ cat > "$tmp" <<'CSS'
 #vertical-tabs .tabbrowser-tab[selected] label,
 #vertical-tabs .tabbrowser-tab[selected] image {
   background: transparent !important;
-}
-
-/* Tab and content tooltips: a flat dialog-toned bubble, not a black one.
- *
- * The native tooltip appearance already paints a rounded shape, so a
- * rectangular border on top of it gets clipped at each corner (the outline
- * vanishes there). Drop the native appearance and draw the rounded surface
- * and its border together so the outline follows the radius. */
-tooltip,
-#tabbrowser-tab-tooltip,
-.tooltip {
-  appearance: none !important;
-  -moz-default-appearance: none !important;
-  color: -moz-dialogtext !important;
-  background-color: -moz-dialog !important;
-  border: 1px solid color-mix(in srgb, -moz-dialogtext 22%, -moz-dialog) !important;
-  border-radius: 8px !important;
-  overflow: clip !important;
 }
 
 /* Right-click menus. Three separate mistakes made these look foreign:
@@ -2047,6 +2120,558 @@ echo "Terminal palette now:"
 grep -E '^(background|foreground) =' "$HOME/.cache/ricelin/ghostty-colors" || true
 echo
 echo "Run with --revert to switch back."
+)
+
+# ---------------------------------------------------------------- stage_vscode
+stage_vscode() (
+# Coding apps follow the live wallpaper. wallcolors.py exports the two files
+# the Matugen Theme extension watches and renders the OpenCode TUI theme from
+# the same curated palette, so VS Code, OpenCode, GTK, KDE and Hyprland stay on
+# one palette. The full editor setup lives in vscode/: settings.json is the
+# source of truth for user settings, extensions.txt is the extension set, and
+# argv.json carries the process-wide preferences. The Matugen Theme extension
+# owns the large VS Code colour mapping; this stage installs it, keeps its
+# palette source current and writes the settings. No VS Code source or bundled
+# theme is patched. The renderers are installed even when VS Code is absent,
+# because the OpenCode theme does not depend on the editor.
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+MT="$CFG/ricelin/matugen"
+WC="$CFG/hypr/scripts/wallcolors.py"
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+SRC="$HERE/vscode"
+
+[ -f "$WC" ] || { echo "wallcolors.py not found at $WC" >&2; exit 1; }
+render=$(mktemp)
+trap 'rm -f "$render"' EXIT HUP INT TERM
+cat > "$render" <<'VSCODE_RENDER_PY'
+# ricelin-vscode-start
+def coding_palette(pill):
+    """Curated syntax colours anchored to the live wallpaper palette.
+
+    The stock OpenCode theme is the reference: its syntax roles and lightness
+    already look modern, so only the hues are pulled toward the wallpaper
+    primary and the chroma is softened. VS Code and OpenCode share the result
+    instead of exposing the raw terminal ANSI wheel in the editor.
+    """
+    _, primary_c, primary_h = oklch(rgb(pill["primary"]))
+    dark = colorsys.rgb_to_hls(*rgb(pill["surface"]))[1] <= 0.5
+
+    def tint(reference):
+        delta = (primary_h - reference + 180) % 360 - 180
+        return (reference + delta * 0.12) % 360
+
+    # Hue, OKLCH lightness and chroma from the stock OpenCode dark syntax.
+    roles = {
+        "variable": (17.0, 0.671, 0.1448),
+        "string": (148.6, 0.808, 0.1340),
+        "number": (69.3, 0.787, 0.1453),
+        "type": (82.3, 0.825, 0.0970),
+        "operator": (206.3, 0.723, 0.0916),
+        "keyword": (299.1, 0.655, 0.1367),
+        "function": (53.9, 0.821, 0.1045),
+        "added": (179.0, 0.796, 0.1218),
+        "removed": (14.9, 0.560, 0.1738),
+        "context": (275.6, 0.646, 0.0682),
+    }
+    # Light backgrounds need medium-dark tokens, not mirrored dark-theme
+    # lightness; mirroring made strings and numbers almost black.
+    light_lightness = {
+        "variable": 0.48, "string": 0.45, "number": 0.52, "type": 0.50,
+        "operator": 0.48, "keyword": 0.45, "function": 0.52,
+        "added": 0.45, "removed": 0.48, "context": 0.55,
+    }
+    chroma_scale = clamp(0.85 + primary_c * 2.0, 0.85, 1.10)
+    colors = {}
+    for name, (reference, lightness, chroma) in roles.items():
+        hue = tint(reference)
+        chroma *= chroma_scale
+        if not dark:
+            lightness = light_lightness[name]
+        color = lch(lightness, chroma, hue)
+        if contrast(color, pill["surface"]) < 4.5:
+            if dark:
+                low, high = lightness, 1.0
+                for _ in range(24):
+                    middle = (low + high) / 2
+                    if contrast(lch(middle, chroma, hue), pill["surface"]) >= 4.5:
+                        high = middle
+                    else:
+                        low = middle
+                color = lch(high, chroma, hue)
+            else:
+                low, high = 0.0, lightness
+                for _ in range(24):
+                    middle = (low + high) / 2
+                    if contrast(lch(middle, chroma, hue), pill["surface"]) >= 4.5:
+                        low = middle
+                    else:
+                        high = middle
+                color = lch(low, chroma, hue)
+        colors[name] = color
+
+    h, l, s = colorsys.rgb_to_hls(*rgb(pill["cream"]))
+    if dark:
+        l = clamp(l * 0.7)
+    else:
+        l = clamp(l + (1 - l) * 0.4)
+    colors["comment"] = "#%02x%02x%02x" % tuple(
+        round(value * 255) for value in colorsys.hls_to_rgb(h, l, s))
+    colors["foreground"] = pill["cream"]
+    colors["bright"] = pill["bright"]
+    colors["surface"] = pill["surface"]
+    colors["primary"] = pill["primary"]
+    return colors
+
+
+def render_vscode(pill, source_hex):
+    """Export the curated coding palette for the Matugen Theme extension."""
+    try:
+        colors = coding_palette(pill)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        print(f"ricelin: could not export the VS Code palette: {error}", file=sys.stderr)
+        return
+
+    def brighter(color, amount=0.10):
+        h, l, s = colorsys.rgb_to_hls(*rgb(color))
+        return "#%02x%02x%02x" % tuple(
+            round(value * 255) for value in colorsys.hls_to_rgb(h, clamp(l + amount), s))
+
+    palette = [
+        colors["surface"], colors["variable"], colors["string"], colors["number"],
+        colors["primary"], colors["keyword"], colors["operator"], colors["foreground"],
+        colors["comment"],
+        brighter(colors["variable"]), brighter(colors["string"]),
+        brighter(colors["number"]), brighter(colors["primary"]),
+        brighter(colors["keyword"]), brighter(colors["operator"]),
+        colors["bright"],
+    ]
+    palette[0] = colors["surface"]
+    palette[4] = colors["primary"]
+    cache = Path.home() / ".cache" / "matugen"
+    write_if_changed(cache / "vscode-colors",
+                     "\n".join(palette) + "\n")
+    write_if_changed(cache / "vscode-colors.json", json.dumps({
+        "checksum": ":)",
+        "wallpaper": "Null",
+        "alpha": "100",
+        "special": {
+            "background": palette[0],
+            "foreground": palette[7],
+            "cursor": colors["primary"],
+        },
+    }, indent=2) + "\n")
+# ricelin-vscode-end
+
+# ricelin-opencode-start
+def render_opencode(pill, source_hex):
+    """Recolour the stock OpenCode theme with the live wallpaper palette."""
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+    template = config / "ricelin-theme.template.json"
+    if not template.is_file():
+        return
+    try:
+        data = json.loads(template.read_text())
+        colors = coding_palette(pill)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"ricelin: could not render the OpenCode theme: {error}", file=sys.stderr)
+        return
+
+    light_surface = colorsys.rgb_to_hls(*rgb(pill["surface"]))[1] > 0.5
+
+    def blend(first, second, amount):
+        a, b = rgb(first), rgb(second)
+        return "#%02x%02x%02x" % tuple(
+            round((x + (y - x) * amount) * 255) for x, y in zip(a, b))
+
+    def scale(base):
+        if light_surface:
+            return {
+                100: blend(base, pill["bright"], 0.90),
+                200: blend(base, pill["bright"], 0.65),
+                300: blend(base, pill["bright"], 0.40),
+                400: base,
+                500: blend(base, pill["surface"], 0.60),
+                600: blend(base, pill["surface"], 0.75),
+                700: blend(base, pill["surface"], 0.88),
+                800: blend(base, pill["surface"], 0.94),
+                900: blend(base, pill["surface"], 0.98),
+            }
+        return {
+            100: blend(base, pill["bright"], 0.75),
+            200: blend(base, pill["bright"], 0.55),
+            300: blend(base, pill["bright"], 0.35),
+            400: base,
+            500: blend(base, pill["surface"], 0.15),
+            600: blend(base, pill["surface"], 0.30),
+            700: blend(base, pill["surface"], 0.45),
+            800: blend(base, pill["surface"], 0.60),
+            900: blend(base, pill["surface"], 0.75),
+        }
+
+    def brighten(color, amount=0.08):
+        h, l, s = colorsys.rgb_to_hls(*rgb(color))
+        return "#%02x%02x%02x" % tuple(
+            round(value * 255) for value in colorsys.hls_to_rgb(h, clamp(l + amount), s))
+
+    # The stock theme's gray scale gives the panels their depth. Keep that
+    # lightness pattern and slide it onto the live surface colour.
+    base_l, base_c, base_h = oklch(rgb(pill["surface"]))
+    if not light_surface:
+        gray_ref = {
+            100: 1.00, 200: 0.73, 300: 0.60, 400: 0.35, 500: 0.26,
+            600: 0.18, 700: 0.12, 800: 0.10, 900: 0.07,
+        }
+        gray = {
+            step: lch(clamp(base_l + (lightness - 0.07)), base_c, base_h)
+            for step, lightness in gray_ref.items()
+        }
+    else:
+        gray_ref = {
+            100: 0.173, 200: 0.431, 300: 0.600, 400: 0.773, 500: 0.925,
+            600: 0.949, 700: 0.961, 800: 0.985, 900: 1.000,
+        }
+        gray = {
+            step: lch(clamp(base_l - (1.0 - lightness)), base_c, base_h)
+            for step, lightness in gray_ref.items()
+        }
+    gray[100] = colors["foreground"]
+    gray[200] = blend(colors["foreground"], colors["comment"], 0.5)
+    gray[300] = colors["comment"]
+
+    hues = {
+        "gray": gray,
+        "blue": scale(colors["primary"]),
+        "orange": scale(colors["number"]),
+        "purple": scale(colors["keyword"]),
+        "red": scale(colors["variable"]),
+        "green": scale(colors["string"]),
+    }
+    hues["accent"] = "$hue.blue"
+    hues["interactive"] = "$hue.blue"
+    hues["neutral"] = "$hue.gray"
+    if light_surface:
+        data["light"]["hue"] = hues
+    else:
+        data["dark"]["hue"] = hues
+
+    base = data["base"]
+    base["background"]["base"] = pill["surface"]
+    base["text"]["base"] = colors["foreground"]
+    base["text"]["muted"] = colors["comment"]
+    base["text"]["feedback"]["warning"]["base"] = colors["number"]
+    base["border"]["base"] = gray[500]
+    base["scrollbar"]["base"] = gray[400]
+
+    base["syntax"] = {
+        "comment": colors["comment"],
+        "keyword": colors["keyword"],
+        "function": colors["function"],
+        "variable": colors["variable"],
+        "string": colors["string"],
+        "number": colors["number"],
+        "type": colors["type"],
+        "operator": colors["operator"],
+        "punctuation": colors["foreground"],
+    }
+
+    added_bg = blend(pill["surface"], colors["added"], 0.12)
+    removed_bg = blend(pill["surface"], colors["removed"], 0.12)
+    base["diff"] = {
+        "text": {
+            "added": colors["added"],
+            "removed": colors["removed"],
+            "context": colors["context"],
+            "hunkHeader": colors["context"],
+        },
+        "background": {
+            "added": added_bg,
+            "removed": removed_bg,
+            "context": gray[700],
+        },
+        "highlight": {
+            "added": brighten(colors["string"]),
+            "removed": brighten(colors["removed"]),
+        },
+        "lineNumber": {
+            "text": colors["comment"],
+            "background": {
+                "added": blend(added_bg, pill["surface"], 0.25),
+                "removed": blend(removed_bg, pill["surface"], 0.25),
+            },
+        },
+    }
+
+    base["markdown"] = {
+        "text": colors["foreground"],
+        "heading": colors["keyword"],
+        "link": colors["function"],
+        "linkText": colors["operator"],
+        "code": colors["string"],
+        "blockQuote": colors["type"],
+        "emphasis": colors["type"],
+        "strong": colors["number"],
+        "horizontalRule": colors["comment"],
+        "listItem": colors["function"],
+        "listEnumeration": colors["operator"],
+        "image": colors["function"],
+        "imageText": colors["operator"],
+        "codeBlock": colors["foreground"],
+    }
+
+    cli_path = config / "cli.json"
+    try:
+        cli = json.loads(cli_path.read_text())
+    except FileNotFoundError:
+        cli = {}
+    except (OSError, ValueError):
+        cli = None
+    if isinstance(cli, dict):
+        theme = cli.get("theme")
+        if not isinstance(theme, dict):
+            theme = {}
+        theme["name"] = "ricelin"
+        theme["mode"] = "light" if light_surface else "dark"
+        cli["theme"] = theme
+        write_if_changed(cli_path, json.dumps(cli, indent=2) + "\n")
+
+    write_if_changed(config / "themes" / "ricelin.json",
+                     json.dumps(data, indent=2) + "\n")
+# ricelin-opencode-end
+VSCODE_RENDER_PY
+
+python3 - "$WC" "$render" <<'PY'
+import ast
+import os
+import re
+import sys
+
+path, blockfile = sys.argv[1], sys.argv[2]
+src = open(path, encoding="utf-8").read()
+block = open(blockfile, encoding="utf-8").read().rstrip() + "\n"
+original = src
+
+# Drop marker-delimited copies from newer runs and any older unmarked
+# renderers, then install one copy of each before publish().
+src = re.sub(r"(?ms)^# ricelin-(?:vscode|opencode)-start\n.*?^# ricelin-(?:vscode|opencode)-end\n\n*", "", src)
+try:
+    tree = ast.parse(src)
+except SyntaxError as error:
+    sys.exit(f"wallcolors.py: could not parse: {error}")
+
+lines = src.splitlines(keepends=True)
+for node in sorted(
+    (node for node in tree.body
+     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"coding_palette", "render_vscode", "render_opencode"}),
+    key=lambda node: node.lineno,
+    reverse=True,
+):
+    start = sum(len(line) for line in lines[:node.lineno - 1])
+    end = sum(len(line) for line in lines[:node.end_lineno])
+    src = src[:start] + src[end:]
+
+anchor = "def publish(pill, source_hex):"
+if anchor not in src:
+    sys.exit("wallcolors.py: publish() anchor is missing")
+src = re.sub(r"\n{3,}(?=def publish\(pill, source_hex\):)", "\n\n\n", src)
+src = src.replace(anchor, block + "\n\n" + anchor, 1)
+
+missing = "".join(
+    f"    {name}(pill, source_hex)\n"
+    for name in ("render_vscode", "render_opencode")
+    if f"    {name}(pill, source_hex)\n" not in src
+)
+if missing:
+    match = re.search(r"(?m)^    render_fastfetch\(pill\)\n", src)
+    if not match:
+        sys.exit("wallcolors.py: render_fastfetch() call is missing")
+    src = src[:match.end()] + missing + src[match.end():]
+
+if src == original:
+    print("wallcolors.py: coding renderers already current")
+    sys.exit(0)
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    handle.write(src)
+try:
+    os.chmod(tmp, os.stat(path).st_mode)
+except OSError:
+    pass
+os.replace(tmp, path)
+print("wallcolors.py: coding renderers installed")
+PY
+
+# Render the current palette now; later wallpaper changes refresh it through
+# wallcolors.py. Pass a non-wallpaper key so the per-wallpaper tone store is not
+# written by this plain installer render.
+wall=$(cat "$HOME/.local/state/ricelin-wallpaper" 2>/dev/null || true)
+if [ -n "$wall" ] && [ -f "$wall" ]; then
+    python3 "$WC" "$wall" "$HOME/.local/state/ricelin/wallpaper-tone.noop" >/dev/null 2>&1 || true
+fi
+
+python3 -m py_compile "$WC"
+rm -f "$(dirname "$WC")/__pycache__/wallcolors."*.pyc
+rmdir "$(dirname "$WC")/__pycache__" 2>/dev/null || true
+
+
+CLI=""
+for candidate in code code-insiders codium; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        CLI=$candidate
+        break
+    fi
+done
+if [ -z "$CLI" ]; then
+    echo "VS Code: no code, code-insiders or codium CLI; skipping the Matugen theme." >&2
+    return 0
+fi
+
+
+# The previous revision fed the extension through a matugen template. The
+# renderer now reuses terminal(), so drop those files instead of leaving a
+# second palette source behind.
+rm -f "$MT/templates/vscode-colors" "$MT/templates/vscode-colors.json" "$MT/vscode.toml"
+rmdir "$MT/templates" "$MT" 2>/dev/null || true
+
+if [ ! -d "$SRC" ]; then
+    echo "VS Code: $SRC is missing; settings and extensions were not installed." >&2
+    return 0
+fi
+
+# Install the complete extension set. A failure is reported and the loop
+# continues, because a few Microsoft extensions are not always mirrored on
+# Open VSX.
+if [ ! -f "$SRC/extensions.txt" ]; then
+    echo "VS Code: $SRC/extensions.txt is missing; no extensions installed." >&2
+else
+    installed_extensions=$("$CLI" --list-extensions 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+    failed_extensions=0
+    extension_total=0
+    while IFS= read -r extension; do
+        extension=${extension%%#*}
+        extension=$(printf '%s' "$extension" | tr -d '[:space:]')
+        [ -n "$extension" ] || continue
+        extension_total=$((extension_total + 1))
+        if printf '%s\n' "$installed_extensions" | grep -Fxq "$extension"; then
+            continue
+        fi
+        if run_quiet "install VS Code extension $extension" \
+            "$CLI" --install-extension "$extension"; then
+            installed_extensions="$installed_extensions"$'\n'"$extension"
+        else
+            failed_extensions=$((failed_extensions + 1))
+            echo "VS Code: could not install $extension; continuing." >&2
+        fi
+    done < "$SRC/extensions.txt"
+    if [ "$failed_extensions" -gt 0 ]; then
+        echo "VS Code: $failed_extensions of $extension_total extensions could not be installed; see the log." >&2
+    else
+        echo "VS Code: all $extension_total extensions installed"
+    fi
+fi
+
+SETTINGS=""
+for name in "Code - OSS" "Code" "Code - Insiders" "VSCodium"; do
+    if [ -d "$CFG/$name" ]; then
+        SETTINGS="$CFG/$name/User/settings.json"
+        break
+    fi
+done
+if [ -z "$SETTINGS" ]; then
+    case "$CLI" in
+        codium) SETTINGS="$CFG/VSCodium/User/settings.json" ;;
+        code-insiders) SETTINGS="$CFG/Code - Insiders/User/settings.json" ;;
+        *) SETTINGS="$CFG/Code - OSS/User/settings.json" ;;
+    esac
+fi
+mkdir -p "$(dirname "$SETTINGS")"
+
+# settings.json is the complete user configuration, not a key-by-key merge. A
+# locally modified file is kept once as settings.json.pre-ricelin.
+if [ ! -f "$SRC/settings.json" ]; then
+    echo "VS Code: $SRC/settings.json is missing; settings not installed." >&2
+else
+    if [ -f "$SETTINGS" ] && ! cmp -s "$SRC/settings.json" "$SETTINGS" \
+        && [ ! -e "$SETTINGS.pre-ricelin" ]; then
+        cp -p -- "$SETTINGS" "$SETTINGS.pre-ricelin"
+    fi
+    if cmp -s "$SRC/settings.json" "$SETTINGS" 2>/dev/null; then
+        echo "VS Code: settings.json already current"
+    else
+        tmp=$(mktemp "$(dirname "$SETTINGS")/.settings.XXXXXX")
+        cp -f -- "$SRC/settings.json" "$tmp"
+        chmod 0644 "$tmp"
+        mv -f -- "$tmp" "$SETTINGS"
+        echo "VS Code: settings.json installed"
+    fi
+fi
+
+# Apply the process-wide preferences without replacing the per-install crash
+# reporter ID or any comments already in argv.json.
+ARGV=""
+for candidate in "$HOME/.vscode-oss/argv.json" "$HOME/.vscode/argv.json" \
+    "$HOME/.vscode-insiders/argv.json" "$HOME/.vscodium/argv.json"; do
+    if [ -f "$candidate" ]; then
+        ARGV=$candidate
+        break
+    fi
+done
+if [ -z "$ARGV" ]; then
+    case "$CLI" in
+        code) ARGV="$HOME/.vscode-oss/argv.json" ;;
+        code-insiders) ARGV="$HOME/.vscode-insiders/argv.json" ;;
+        codium) ARGV="$HOME/.vscodium/argv.json" ;;
+        *) ARGV="$HOME/.vscode/argv.json" ;;
+    esac
+fi
+mkdir -p "$(dirname "$ARGV")"
+python3 - "$SRC/argv.json" "$ARGV" <<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+seed, target = Path(sys.argv[1]), Path(sys.argv[2])
+existed = target.is_file()
+if existed:
+    text = target.read_text(encoding="utf-8")
+else:
+    text = seed.read_text(encoding="utf-8") if seed.is_file() else "{\n}\n"
+if not text.strip():
+    text = "{\n}\n"
+original = text
+
+for key, value in (("enable-crash-reporter", "false"), ("password-store", '"basic"')):
+    pattern = re.compile(r'("' + re.escape(key) + r'"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|true|false|null|-?\d+(?:\.\d+)?)')
+    match = pattern.search(text)
+    if match:
+        text = text[:match.start()] + match.group(1) + value + text[match.end():]
+        continue
+    opening = text.find("{")
+    if opening < 0:
+        sys.exit("VS Code argv.json: no opening brace")
+    text = text[:opening + 1] + f'\n  "{key}": {value},' + text[opening + 1:]
+
+if existed and text == original:
+    print("VS Code: argv.json already current")
+    sys.exit(0)
+
+try:
+    mode = stat.S_IMODE(os.stat(target).st_mode)
+except OSError:
+    mode = 0o644
+tmp = target.with_name(target.name + ".tmp")
+tmp.write_text(text, encoding="utf-8")
+os.chmod(tmp, mode)
+os.replace(tmp, target)
+print("VS Code: argv.json preferences applied")
+PY
+
+echo "VS Code: full config installed; reload the window to apply settings and extensions."
 )
 
 # ---------------------------------------------------------------- stage_kde_fish_palette
@@ -9282,6 +9907,8 @@ stage_opencode_config() (
 #   command/{spec,verify,review,test}.md
 #   oh-my-opencode-slim/production/    orchestrator and observer appends
 #   templates/repo-AGENTS.md           per-repository starter
+#   ricelin-theme.template.json        OpenCode theme template (rendered by wallcolors.py)
+#   cli.json                           theme and scrollbar selection (merged, not replaced)
 #
 # The peak-guard stage owns ~/.config/opencode/plugins and the model pin; this
 # stage only replaces the files it ships. A file the user has edited is kept as
@@ -9319,6 +9946,39 @@ while IFS= read -r -d '' src; do
     mv -f -- "$tmp" "$dest"
     installed=$((installed + 1))
 done < <(find "$SRC" -type f -print0 | sort -z)
+
+# Select the wallpaper-derived coding theme in the terminal client. cli.json
+# is TUI-only and may contain other settings, so merge the theme and the
+# scrollbar preference instead of replacing the file.
+python3 - "$DEST/cli.json" <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text())
+except FileNotFoundError:
+    data = {}
+except (OSError, ValueError):
+    shutil.copy2(path, path.with_name(path.name + ".pre-ricelin"))
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+data["theme"] = {"name": "ricelin", "mode": "dark"}
+session = data.get("session")
+if not isinstance(session, dict):
+    session = {}
+session["scrollbar"] = False
+data["session"] = session
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text(json.dumps(data, indent=2) + "\n")
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+print("OpenCode: theme ricelin, session scrollbar hidden")
+PY
 
 echo "OpenCode: production config in $DEST ($installed file(s) updated)"
 )

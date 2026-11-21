@@ -10,6 +10,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Installs OpenCode from the Arch `extra` repository.
+- Installs the full VS Code user setup from `vscode/`: `settings.json`,
+  `extensions.txt` and the `argv.json` preferences. An edited settings file is
+  kept once as `settings.json.pre-ricelin`.
+- Keeps VS Code on a curated wallpaper-derived syntax palette through the
+  Matugen Theme extension and recolours the stock OpenCode TUI theme with the
+  same palette, published as `ricelin` and selected in
+  `~/.config/opencode/cli.json` with the transcript scrollbar disabled. The
+  stock theme's layout and panel depth are preserved, and both it and VS Code
+  switch between dark and light with the wallpaper palette. VS Code itself is
+  not installed by the installer.
 - Installs Hermes Agent and builds Hermes Desktop through the official
   bootstrap and runs Hermes's own interactive setup wizard for the provider,
   model, API key, tools, gateway and telemetry.
@@ -92,19 +102,6 @@ and the project uses [Semantic Versioning](https://semver.org/).
   per-wallpaper tone instead of insisting on Dark.
 
 ### Fixed
-
-- `final_render` renders the active wallpaper with its saved per-wallpaper
-  tone, so a normal installer render no longer clears the pinned Dark tone
-  that stage 14 saves for `4.jpg`. The previous revision of the wallcolors
-  patch is migrated in place.
-- Only a real wallpaper switch (the pill or `wallpaper.sh` passing the key)
-  updates the per-wallpaper tone store; plain installer renders leave it alone.
-  The Zen, Hermes and one-tone stages now pass a non-wallpaper key so even the
-  first re-run cannot clear `4.jpg`'s pinned tone before the patch migration.
-- The `wallcolors.py` hooks for SDDM, KDE, HyprToolkit, the portal scheme and
-  the Hermes skin are replaced in place and guarded with an exact marker.
-  Re-running the installer no longer moves them, grows blank lines or inserts a
-  second `render_kde`/`render_hermes` definition.
 
 ### Planned
 

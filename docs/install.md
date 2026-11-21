@@ -21,6 +21,19 @@ re-run safely.
 - Generates a Ricelin skin for the Hermes Desktop default window from the
   normal palette pass, so it refreshes whenever `wallcolors.py` runs. HUD and
   Quick Entry are disabled and their controls hidden.
+- Installs the full VS Code user setup from `vscode/` when a `code`,
+  `code-insiders` or `codium` CLI is present: `settings.json` is the complete
+  user configuration, `extensions.txt` is the extension set (including the
+  Matugen Theme, file-icons and Custom UI Style extensions), and `argv.json`
+  carries the process-wide preferences. A locally edited settings file is kept
+  once as `settings.json.pre-ricelin`.
+- Selects the generated “Matugen” theme and exports a curated syntax palette
+  from the same `wallcolors.py` pass, so the editor follows every wallpaper
+  change. The same palette recolours the stock OpenCode TUI theme, selected as
+  `ricelin` in `~/.config/opencode/cli.json` with the transcript scrollbar
+  disabled. The stock theme keeps its layout and panel depth; only the colours
+  are tinted toward the wallpaper, and the client switches between dark and
+  light with the palette. VS Code itself is not installed by the installer.
 - Moves wallpapers from `~/Ricelin/wallpapers` to
   `~/.config/ricelin/wallpapers`, updates the saved paths, installs the bundled
   `1.png`, `2.jpg`, `3.png` and `4.jpg` set, and makes `4.jpg` the default with
@@ -49,15 +62,6 @@ re-run safely.
   source line and keeps `~/.local/bin` on PATH.
 - Adds Thunar's “Open Terminal Here” action, opening ghostty in the selected
   folder.
-- Removes Ricelin's upstream Discord special workspace and removes rishot,
-  its config, launcher, desktop entry, Print binds and Hyprland `require`.
-- Restores the executable bit on the wallpaper helpers, fixing SUPER+B.
-- Removes every installed **LightDM** package, file and user, disables the other
-  known display managers, and removes **Firefox** and **Dolphin**, including
-  their user config.
-- Makes Zen the default browser and Thunar the folder handler.
-- Never stops the running graphical session. Reboot to land on SDDM.
-
 ## Model routing
 
 The stage installs:

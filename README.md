@@ -72,8 +72,9 @@ The installer runs six phases:
    OpenCode / Hermes activity line in the pill, the production OpenCode setup
    (oh-my-opencode-slim `production` preset, global `AGENTS.md`, `/spec`,
    `/verify`, `/review` and `/test`), DeepSeek V4.1 Flash pinned with the
-   peak-pricing guard, KDE/fish and terminal palette, the fish config (no
-   CachyOS source, `~/.local/bin` on PATH), the
+   peak-pricing guard, KDE/fish and terminal palette, the full VS Code
+   settings and extension set with the live wallpaper palette for VS Code and
+   OpenCode, the fish config (no CachyOS source, `~/.local/bin` on PATH), the
    Thunar “Open Terminal Here” action (ghostty), portal colour-scheme sync,
    Zen colours, Thunar, polkit, night-light cursor, wallpaper tone,
    wallpaper-strip centring, lock-screen palette, settings zoom, atomic theme
