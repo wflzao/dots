@@ -2159,11 +2159,15 @@ def coding_palette(pill):
     _, primary_c, primary_h = oklch(rgb(pill["primary"]))
     dark = colorsys.rgb_to_hls(*rgb(pill["surface"]))[1] <= 0.5
 
-    def tint(reference):
-        delta = (primary_h - reference + 180) % 360 - 180
-        return (reference + delta * 0.12) % 360
+    # Rotate the stock hue wheel toward the wallpaper accent. Neutral
+    # wallpapers rotate less, and the cap keeps the roles recognisable.
+    delta = (primary_h - 60.0 + 180) % 360 - 180
+    strength = clamp(primary_c / 0.08, 0.0, 1.0)
+    rotation = clamp(delta * 0.45, -35.0, 35.0) * strength
 
-    # Hue, OKLCH lightness and chroma from the stock OpenCode dark syntax.
+    # Hue, lightness and chroma from the stock OpenCode dark syntax. Dark mode
+    # keeps the stock lightness; light mode asks for a bright token and lets the
+    # contrast fit pull it back to the brightest readable value.
     roles = {
         "variable": (17.0, 0.671, 0.1448),
         "string": (148.6, 0.808, 0.1340),
@@ -2176,20 +2180,13 @@ def coding_palette(pill):
         "removed": (14.9, 0.560, 0.1738),
         "context": (275.6, 0.646, 0.0682),
     }
-    # Light backgrounds need medium-dark tokens, not mirrored dark-theme
-    # lightness; mirroring made strings and numbers almost black.
-    light_lightness = {
-        "variable": 0.48, "string": 0.45, "number": 0.52, "type": 0.50,
-        "operator": 0.48, "keyword": 0.45, "function": 0.52,
-        "added": 0.45, "removed": 0.48, "context": 0.55,
-    }
-    chroma_scale = clamp(0.85 + primary_c * 2.0, 0.85, 1.10)
+    chroma_scale = clamp(0.72 + primary_c * 1.8, 0.72, 1.00)
     colors = {}
     for name, (reference, lightness, chroma) in roles.items():
-        hue = tint(reference)
+        hue = (reference + rotation) % 360
         chroma *= chroma_scale
         if not dark:
-            lightness = light_lightness[name]
+            lightness = 0.62
         color = lch(lightness, chroma, hue)
         if contrast(color, pill["surface"]) < 4.5:
             if dark:
